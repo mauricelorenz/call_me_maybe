@@ -9,4 +9,5 @@ dependencies = [
     "mypy>=1.20.0",
     "numpy>=2.2.6",
     "pydantic>=2.12.5",
+    "llm-sdk @ file://${PROJECT_ROOT}/llm_sdk",
 ]
