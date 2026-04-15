@@ -2,6 +2,7 @@ import argparse
 import json
 from sys import exit
 from typing import List, Dict
+import llm_sdk
 
 
 def parse_infile(path: str) -> List[Dict[str, str]]:
@@ -29,7 +30,11 @@ def main() -> None:
     args = parser.parse_args()
     functions_definition = parse_infile(args.functions_definition)
     input = parse_infile(args.input)
-    print(functions_definition, "\n\n", input)
+    # print(functions_definition, "\n\n", input)
+    llm = llm_sdk.Small_LLM_Model()
+    tokens = llm.encode("What is the sum of 2 and 3?")
+    decoded = llm.decode(tokens)
+    print(f"Tokens: {tokens}\nString: {decoded}")
 
 
 if __name__ == "__main__":
