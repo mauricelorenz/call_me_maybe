@@ -34,7 +34,11 @@ def main() -> None:
     llm = llm_sdk.Small_LLM_Model()
     tokens = llm.encode("What is the sum of 2 and 3?")
     decoded = llm.decode(tokens)
-    print(f"Tokens: {tokens}\nString: {decoded}")
+    logits = llm.get_logits_from_input_ids(tokens[0].tolist())
+    print(f"Tokens: {tokens}")
+    print(f"String: {decoded}")
+    print(f"Logits: {logits}")
+    print(tokens.shape)
 
 
 if __name__ == "__main__":
