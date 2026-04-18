@@ -3,6 +3,38 @@ import json
 from sys import exit
 from typing import List, Dict
 import llm_sdk
+import numpy as np
+
+
+def test_llm(fd: List[Dict[str, str]], input: List[Dict[str, str]]) -> None:
+    llm = llm_sdk.Small_LLM_Model()  # type: ignore
+    fd_string = json.dumps(fd)
+    prompt = (f"Pick a function matching the question 'What is the sum of 2 a"
+              f"nd 3?' out of the following: {fd_string} and return the name")
+    tokens = llm.encode(prompt)
+    # decoded = llm.decode(tokens)
+    tokens_list = tokens[0].tolist()
+    # print(parse_infile(llm.get_path_to_tokenizer_file()))
+    i = 50
+    while i:
+        logits = llm.get_logits_from_input_ids(tokens_list)
+        next_token = np.argmax(logits)
+        tokens_list.append(next_token)
+        i -= 1
+    print(f"Tokens: {tokens_list}\n")
+    print(f"String: {llm.decode(tokens_list)}")
+    # vocab_file = llm.get_path_to_vocab_file()
+    # print(vocab_file)
+    # vocab_content = parse_infile(vocab_file)
+    # special_tokens = {}
+    # for key in vocab_content.keys():
+    #     if "endof" in key:
+    #         special_tokens[key] = vocab_content[key]
+    # print(special_tokens)
+    # print(f"Tokens: {tokens}")
+    # print(f"String: {decoded}")
+    # print(f"Logits: {logits}")
+    # print(tokens.shape)
 
 
 def parse_infile(path: str) -> List[Dict[str, str]]:
@@ -30,15 +62,7 @@ def main() -> None:
     args = parser.parse_args()
     functions_definition = parse_infile(args.functions_definition)
     input = parse_infile(args.input)
-    # print(functions_definition, "\n\n", input)
-    llm = llm_sdk.Small_LLM_Model()
-    tokens = llm.encode("What is the sum of 2 and 3?")
-    decoded = llm.decode(tokens)
-    logits = llm.get_logits_from_input_ids(tokens[0].tolist())
-    print(f"Tokens: {tokens}")
-    print(f"String: {decoded}")
-    print(f"Logits: {logits}")
-    print(tokens.shape)
+    test_llm(functions_definition, input)
 
 
 if __name__ == "__main__":
