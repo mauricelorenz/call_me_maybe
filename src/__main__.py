@@ -6,37 +6,66 @@ import llm_sdk
 import numpy as np
 
 
-def call_llm(llm: Any, functions_definition: List[Dict[str, str]], prompt_string: str, vocab_json: Dict[str, int]) -> str:
+def encode_list(llm: Any, string_list: list[str]) -> List[List[int]]:
+    token_list = []
+    for string in string_list:
+        template_token = llm.encode(string)
+        token_list.append(template_token[0].tolist())
+    return token_list
+
+
+def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
+             prompt_string: str) -> str:
     fd_string = json.dumps(functions_definition)
     full_prompt = (f"Pick a function matching the question "
-                f"'{prompt_string}' out of the following: "
-                f"{fd_string} and return only a JSON containing "
-                f"prompt, name and the parameters.")
+                   f"'{prompt_string}' out of the following: "
+                   f"{fd_string} and return only a JSON containing "
+                   f"prompt, name and the parameters.")
     full_prompt_tokens = llm.encode(full_prompt)
     full_prompt_tokens_list = full_prompt_tokens[0].tolist()
     max_tokens = 100
     state = "START"
-    template_list = [f"{{\"prompt\": {prompt_string}, \"name\": \"", "\", \"parameters\": {\"", "}}"]
-    template_tokens = []
-    for string in template_list:
-        template_token = llm.encode(string)
-        template_tokens.append(template_token[0].tolist())
+    template_list = [f"{{\"prompt\": {prompt_string}, \"name\": \"",
+                     ", \"parameters\": {\"", "}}"]
+    template_tokens = encode_list(llm, template_list)
+    fd_name_list = [f"{item['name']}\"" for item in functions_definition]
+    fd_name_tokens = encode_list(llm, fd_name_list)
     i = 0
     generated = []
+    name: List[int] = []
     while max_tokens:
         logits = llm.get_logits_from_input_ids(full_prompt_tokens_list)
+        logits_array = np.array(logits)
+        masked = np.full(len(logits), -np.inf)
         if state == "START" and i < len(template_tokens[0]):
-            logits_array = np.array(logits)
-            masked = np.full(len(logits), -np.inf)
             masked[template_tokens[0][i]] = logits_array[template_tokens[0][i]]
             next_token = np.argmax(masked)
             i += 1
         elif state == "NAME":
+            for fd_name_token in fd_name_tokens:
+                if not name or (len(fd_name_token) > i
+                                and fd_name_token[i - 1] == name[i - 1]):
+                    masked[fd_name_token[i]] = logits_array[fd_name_token[i]]
+            next_token = np.argmax(masked)
+            name.append(int(next_token))
+            i += 1
+        elif state == "PARAM_KEY" and i < len(template_tokens[1]):
+            masked[template_tokens[1][i]] = logits_array[template_tokens[1][i]]
+            next_token = np.argmax(masked)
+            i += 1
+        else:
             next_token = np.argmax(logits)
         generated.append(int(next_token))
         full_prompt_tokens_list.append(int(next_token))
         if state == "START" and i >= len(template_tokens[0]):
             state = "NAME"
+            i = 0
+        elif state == "NAME" and name in fd_name_tokens:
+            state = "PARAM_KEY"
+            i = 0
+        elif state == "PARAM_KEY" and i >= len(template_tokens[1]):
+            state = "NEXT"
+            i = 0
             break
         try:
             json.loads(llm.decode(generated))
@@ -44,23 +73,22 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]], prompt_string
         except Exception:
             pass
         max_tokens -= 1
-    return llm.decode(generated)
+    return str(llm.decode(generated))
 
 
 def generate_outfile(functions_definition: List[Dict[str, str]],
                      input: List[Dict[str, str]]) -> None:
     llm = llm_sdk.Small_LLM_Model()  # type: ignore
-    vocab_json = parse_infile(llm.get_path_to_vocab_file())
     for prompt in input:
         prompt_string = json.dumps(prompt["prompt"])
-        result_string = call_llm(llm, functions_definition, prompt_string, vocab_json)
+        result_string = call_llm(llm, functions_definition, prompt_string)
         print(result_string)
 
 
-def parse_infile(path: str) -> Any:
+def parse_infile(path: str) -> List[Dict[str, str]]:
     try:
         with open(path) as f:
-            infile: Any = json.load(f)
+            infile: List[Dict[str, str]] = json.load(f)
     except (FileNotFoundError, PermissionError, json.JSONDecodeError) as e:
         print(f"Error while parsing {path}: {e}")
         exit(1)
