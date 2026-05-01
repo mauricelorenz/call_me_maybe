@@ -6,12 +6,19 @@ import llm_sdk
 import numpy as np
 
 
-def encode_list(llm: Any, string_list: list[str]) -> List[List[int]]:
+def encode_list(llm: Any, string_list: List[str]) -> List[List[int]]:
     token_list = []
     for string in string_list:
         template_token = llm.encode(string)
         token_list.append(template_token[0].tolist())
     return token_list
+
+
+def get_param_template(name: str, functions_definition: List[Dict[str, str]]) -> List[List[str]]:
+    for definition in functions_definition:
+        if definition["name"] == name:
+            return [[key for key in definition["parameters"]],
+            [definition["parameters"][key]["type"] for key in definition["parameters"]]]
 
 
 def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
@@ -26,13 +33,14 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
     max_tokens = 100
     state = "START"
     template_list = [f"{{\"prompt\": {prompt_string}, \"name\": \"",
-                     ", \"parameters\": {\"", "}}"]
+                     ", \"parameters\": {", "}}"]
     template_tokens = encode_list(llm, template_list)
     fd_name_list = [f"{item['name']}\"" for item in functions_definition]
     fd_name_tokens = encode_list(llm, fd_name_list)
     i = 0
     generated = []
     name: List[int] = []
+    param_template = None
     while max_tokens:
         logits = llm.get_logits_from_input_ids(full_prompt_tokens_list)
         logits_array = np.array(logits)
@@ -53,6 +61,10 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
             masked[template_tokens[1][i]] = logits_array[template_tokens[1][i]]
             next_token = np.argmax(masked)
             i += 1
+        elif state == "PARAM_VALUE" and not param_template:
+            param_template = get_param_template(llm.decode(name).replace("\"", ""), functions_definition)
+        elif state == "PARAM_VALUE" and i < len(param_template[0]):
+            
         else:
             next_token = np.argmax(logits)
         generated.append(int(next_token))
@@ -64,7 +76,7 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
             state = "PARAM_KEY"
             i = 0
         elif state == "PARAM_KEY" and i >= len(template_tokens[1]):
-            state = "NEXT"
+            state = "PARAM_VALUE"
             i = 0
             break
         try:
@@ -110,7 +122,8 @@ def main() -> None:
     args = parser.parse_args()
     functions_definition = parse_infile(args.functions_definition)
     input = parse_infile(args.input)
-    generate_outfile(functions_definition, input)
+    # generate_outfile(functions_definition, input)
+    print(get_param_template("fn_substitute_string_with_regex", functions_definition))
 
 
 if __name__ == "__main__":
