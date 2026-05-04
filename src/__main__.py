@@ -84,6 +84,9 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
         elif state == "PARAM_VALUE" and i < len(param_template[0]):
             if in_tokens:
                 if j < len(param_template[0][i]):
+                    if j == 0 and llm.decode(generated[-1]).endswith(","):
+                        j += 1
+                        continue
                     masked[param_template[0][i][j]] = logits_array[param_template[0][i][j]]
                     next_token = np.argmax(masked)
                     j += 1
