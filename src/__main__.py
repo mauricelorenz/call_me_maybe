@@ -41,7 +41,8 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
     full_prompt = (f"Pick a function matching the question "
                    f"'{prompt_string}' out of the following: "
                    f"{fd_string} and return only a JSON containing "
-                   f"prompt, name and the parameters.")
+                   f"prompt, name and the parameters. If you generate "
+                   f"a regular expression, make sure it matches the requested syntax.")
     full_prompt_tokens = llm.encode(full_prompt)
     full_prompt_tokens_list = full_prompt_tokens[0].tolist()
     max_tokens = 100
@@ -101,7 +102,10 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
                         i += 1
                         in_tokens = True
                         masked[llm.encode("\"")] = logits_array[llm.encode("\"")]
-                        next_token = np.argmax(masked)
+                        if llm.decode([int(np.argmax(logits_array))]).startswith("\""):
+                            next_token = np.argmax(masked)
+                        else:
+                            next_token = np.argmax(logits_array)
                     else:
                         next_token = np.argmax(logits_array)
                         j += 1
