@@ -4,6 +4,7 @@ from sys import exit
 from typing import List, Dict, Any
 import llm_sdk
 import numpy as np
+import os
 
 
 def encode_list(llm: Any, string_list: List[str]) -> List[List[int]]:
@@ -14,11 +15,14 @@ def encode_list(llm: Any, string_list: List[str]) -> List[List[int]]:
     return token_list
 
 
-def get_param_template(llm: Any, name: str, functions_definition: List[Dict[str, str]]) -> List[List[str]]:
+def get_param_template(llm: Any, name: str,
+                       functions_definition: List[Dict[str, str]]
+                       ) -> List[List[str]]:
     for definition in functions_definition:
         if definition["name"] == name:
             raw_keys = [key for key in definition["parameters"]]
-            types = [definition["parameters"][key]["type"] for key in definition["parameters"]]
+            types = [definition["parameters"][key]["type"]
+                     for key in definition["parameters"]]
     key_strings = []
     for i, key in enumerate(raw_keys):
         if i == 0:
@@ -35,6 +39,7 @@ def is_valid_number(next_token_str: str, j: int) -> bool:
         return False
     return True
 
+
 def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
              prompt_string: str) -> str:
     fd_string = json.dumps(functions_definition)
@@ -42,7 +47,8 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
                    f"'{prompt_string}' out of the following: "
                    f"{fd_string} and return only a JSON containing "
                    f"prompt, name and the parameters. If you generate "
-                   f"a regular expression, make sure it matches the requested syntax.")
+                   f"a regular expression, make sure it matches the "
+                   f"requested syntax.")
     full_prompt_tokens = llm.encode(full_prompt)
     full_prompt_tokens_list = full_prompt_tokens[0].tolist()
     max_tokens = 100
@@ -79,7 +85,10 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
             next_token = np.argmax(masked)
             i += 1
         elif state == "PARAM_VALUE" and not param_template:
-            param_template = get_param_template(llm, llm.decode(name).replace("\"", ""), functions_definition)
+            name_stripped = llm.decode(name).replace("\"", "")
+            param_template = get_param_template(llm,
+                                                name_stripped,
+                                                functions_definition)
             continue
         elif state == "PARAM_VALUE" and i < len(param_template[0]):
             if in_tokens:
@@ -144,22 +153,26 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
             i = 0
         elif state == "END" and i >= len(template_tokens[2]):
             break
-        try:
-            json.loads(llm.decode(generated))
-            break
-        except Exception:
-            pass
         max_tokens -= 1
     return str(llm.decode(generated))
 
 
 def generate_outfile(functions_definition: List[Dict[str, str]],
-                     input: List[Dict[str, str]]) -> None:
+                     input: List[Dict[str, str]], output_path: str) -> None:
     llm = llm_sdk.Small_LLM_Model()  # type: ignore
-    for prompt in input:
+    input_len = len(input)
+    json_from_file = []
+    for i, prompt in enumerate(input, 1):
+        print(f"\nProcessing prompt {i}/{input_len}...")
         prompt_string = json.dumps(prompt["prompt"])
         result_string = call_llm(llm, functions_definition, prompt_string)
         print(result_string)
+        result_json = json.loads(result_string)
+        if not os.path.exists(output_path):
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        json_from_file.append(result_json)
+        with open(output_path, "w") as f:
+            json.dump(json_from_file, f, indent=2)
 
 
 def parse_infile(path: str) -> List[Dict[str, str]]:
@@ -187,7 +200,8 @@ def main() -> None:
     args = parser.parse_args()
     functions_definition = parse_infile(args.functions_definition)
     input = parse_infile(args.input)
-    generate_outfile(functions_definition, input)
+    output_path = args.output
+    generate_outfile(functions_definition, input, output_path)
 
 
 if __name__ == "__main__":
