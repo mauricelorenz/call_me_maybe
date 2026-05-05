@@ -1,8 +1,9 @@
 import json
-from typing import List, Dict, Any
+from typing import List, Any
 import llm_sdk
 import numpy as np
 import os
+from src.parsing import FunctionsDefinition, InputPrompt
 
 
 def encode_list(llm: Any, string_list: List[str]) -> List[List[int]]:
@@ -14,13 +15,13 @@ def encode_list(llm: Any, string_list: List[str]) -> List[List[int]]:
 
 
 def get_param_template(llm: Any, name: str,
-                       functions_definition: List[Dict[str, str]]
+                       functions_definition: List[FunctionsDefinition]
                        ) -> List[List[str]]:
     for definition in functions_definition:
-        if definition["name"] == name:
-            raw_keys = [key for key in definition["parameters"]]
-            types = [definition["parameters"][key]["type"]
-                     for key in definition["parameters"]]
+        if definition.name == name:
+            raw_keys = [key for key in definition.parameters]
+            types = [definition.parameters[key]["type"]
+                     for key in definition.parameters]
     key_strings = []
     for i, key in enumerate(raw_keys):
         if i == 0:
@@ -38,9 +39,9 @@ def is_valid_number(next_token_str: str, j: int) -> bool:
     return True
 
 
-def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
+def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
              prompt_string: str) -> str:
-    fd_string = json.dumps(functions_definition)
+    fd_string = json.dumps([fd.model_dump() for fd in functions_definition])
     full_prompt = (f"Pick a function matching the question "
                    f"'{prompt_string}' out of the following: "
                    f"{fd_string} and return only a JSON containing "
@@ -54,7 +55,7 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
     template_list = [f"{{\"prompt\": {prompt_string}, \"name\": \"",
                      ", \"parameters\": {", "}}"]
     template_tokens = encode_list(llm, template_list)
-    fd_name_list = [f"{item['name']}\"" for item in functions_definition]
+    fd_name_list = [f"{item.name}\"" for item in functions_definition]
     fd_name_tokens = encode_list(llm, fd_name_list)
     i = 0
     generated = []
@@ -155,14 +156,14 @@ def call_llm(llm: Any, functions_definition: List[Dict[str, str]],
     return str(llm.decode(generated))
 
 
-def generate_outfile(functions_definition: List[Dict[str, str]],
-                     input: List[Dict[str, str]], output_path: str) -> None:
+def generate_outfile(functions_definition: List[FunctionsDefinition],
+                     input_prompts: List[InputPrompt], output_path: str) -> None:
     llm = llm_sdk.Small_LLM_Model()  # type: ignore
-    input_len = len(input)
+    input_len = len(input_prompts)
     json_from_file = []
-    for i, prompt in enumerate(input, 1):
+    for i, item in enumerate(input_prompts, 1):
         print(f"\nProcessing prompt {i}/{input_len}...")
-        prompt_string = json.dumps(prompt["prompt"])
+        prompt_string = json.dumps(item.prompt)
         result_string = call_llm(llm, functions_definition, prompt_string)
         print(result_string)
         result_json = json.loads(result_string)

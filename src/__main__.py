@@ -1,6 +1,7 @@
 import argparse
-from src.parsing import parse_infile
+from src.parsing import FunctionsDefinition, InputPrompt, parse_infile
 from src.inference import generate_outfile
+
 
 def main() -> None:
     """Run the main program."""
@@ -15,10 +16,11 @@ def main() -> None:
                         default="data/output/function_calls.json",
                         help="path for the output JSON file")
     args = parser.parse_args()
-    functions_definition = parse_infile(args.functions_definition)
-    input = parse_infile(args.input)
+    functions_definition = parse_infile(args.functions_definition,
+                                        FunctionsDefinition)
+    input_prompts = parse_infile(args.input, InputPrompt)
     output_path = args.output
-    generate_outfile(functions_definition, input, output_path)
+    generate_outfile(functions_definition, input_prompts, output_path)
 
 
 if __name__ == "__main__":
