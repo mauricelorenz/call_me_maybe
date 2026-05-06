@@ -1,5 +1,5 @@
 import json
-from typing import List, Any
+from typing import Optional, Tuple, List, Dict, Any
 import llm_sdk
 import numpy as np
 import os
@@ -7,28 +7,28 @@ from src.parsing import FunctionsDefinition, InputPrompt
 
 
 def encode_list(llm: Any, string_list: List[str]) -> List[List[int]]:
-    token_list = []
+    token_list: List[List[int]] = []
     for string in string_list:
-        template_token = llm.encode(string)
-        token_list.append(template_token[0].tolist())
+        template_tokens: List[int] = llm.encode(string)[0].tolist()
+        token_list.append(template_tokens)
     return token_list
 
 
 def get_param_template(llm: Any, name: str,
                        functions_definition: List[FunctionsDefinition]
-                       ) -> List[List[str]]:
+                       ) -> Tuple[List[List[int]], List[str]]:
     for definition in functions_definition:
         if definition.name == name:
-            raw_keys = [key for key in definition.parameters]
-            types = [definition.parameters[key]["type"]
-                     for key in definition.parameters]
-    key_strings = []
+            raw_keys: List[str] = [key for key in definition.parameters]
+            types: List[str] = [definition.parameters[key]["type"]
+                                for key in definition.parameters]
+    key_strings: List[str] = []
     for i, key in enumerate(raw_keys):
         if i == 0:
             key_strings.append(f"\"{key}\": ")
         else:
             key_strings.append(f", \"{key}\": ")
-    return [encode_list(llm, key_strings), types]
+    return (encode_list(llm, key_strings), types)
 
 
 def is_valid_number(next_token_str: str, j: int) -> bool:
@@ -39,37 +39,54 @@ def is_valid_number(next_token_str: str, j: int) -> bool:
     return True
 
 
+def get_static_tokens(llm: Any,
+                      functions_definition: List[FunctionsDefinition],
+                      prompt_string: str
+                      ) -> Tuple[List[int], List[List[int]], List[List[int]]]:
+    fd_string: str = json.dumps([fd.model_dump() for fd
+                                in functions_definition])
+    full_prompt: str = ("Pick a function matching the question "
+                        f"'{prompt_string}' out of the following: "
+                        f"{fd_string} and return only a JSON containing "
+                        "prompt, name and the parameters. If you generate "
+                        "a regular expression, make sure it matches the "
+                        "requested syntax.")
+    full_prompt_tokens: List[int] = llm.encode(full_prompt)[0].tolist()
+    template_list: List[str] = [f"{{\"prompt\": {prompt_string}, \"name\": \"",
+                                ", \"parameters\": {", "}}"]
+    template_tokens: List[List[int]] = encode_list(llm, template_list)
+    fd_name_list: List[str] = [f"{item.name}\"" for item
+                               in functions_definition]
+    fd_name_tokens: List[List[int]] = encode_list(llm, fd_name_list)
+    return (full_prompt_tokens, template_tokens, fd_name_tokens)
+
+
 def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
              prompt_string: str) -> str:
-    fd_string = json.dumps([fd.model_dump() for fd in functions_definition])
-    full_prompt = (f"Pick a function matching the question "
-                   f"'{prompt_string}' out of the following: "
-                   f"{fd_string} and return only a JSON containing "
-                   f"prompt, name and the parameters. If you generate "
-                   f"a regular expression, make sure it matches the "
-                   f"requested syntax.")
-    full_prompt_tokens = llm.encode(full_prompt)
-    full_prompt_tokens_list = full_prompt_tokens[0].tolist()
-    max_tokens = 100
-    state = "START"
-    template_list = [f"{{\"prompt\": {prompt_string}, \"name\": \"",
-                     ", \"parameters\": {", "}}"]
-    template_tokens = encode_list(llm, template_list)
-    fd_name_list = [f"{item.name}\"" for item in functions_definition]
-    fd_name_tokens = encode_list(llm, fd_name_list)
-    i = 0
-    generated = []
+    static_tokens: Tuple[Any, ...] = get_static_tokens(llm,
+                                                       functions_definition,
+                                                       prompt_string)
+    full_prompt_tokens: List[int] = static_tokens[0]
+    template_tokens: List[List[int]] = static_tokens[1]
+    fd_name_tokens: List[List[int]] = static_tokens[2]
+    max_tokens: int = 100
+    generated: List[int] = []
     name: List[int] = []
-    param_template = None
-    in_tokens = True
-    j = 0
+    param_template: Optional[Tuple[List[List[int]], List[str]]] = None
+    in_param_template: bool = True
+    i: int = 0
+    j: int = 0
+    state: str = "START"
+    template_states: List[str] = ["START", "PARAM_KEY", "END"]
     while max_tokens:
-        logits = llm.get_logits_from_input_ids(full_prompt_tokens_list)
-        logits_array = np.array(logits)
-        masked = np.full(len(logits), -np.inf)
-        if state == "START" and i < len(template_tokens[0]):
-            masked[template_tokens[0][i]] = logits_array[template_tokens[0][i]]
-            next_token = np.argmax(masked)
+        logits: List[float] = llm.get_logits_from_input_ids(full_prompt_tokens)
+        logits_array: np.ndarray[Any, np.dtype[Any]] = np.array(logits)
+        masked: np.ndarray[Any, np.dtype[Any]] = np.full(len(logits), -np.inf)
+        if state in template_states:
+            state_index: int = template_states.index(state)
+            token_id: int = template_tokens[state_index][i]
+            masked[token_id] = logits_array[token_id]
+            next_token: np.intp | None = np.argmax(masked)
             i += 1
         elif state == "NAME":
             for fd_name_token in fd_name_tokens:
@@ -79,41 +96,40 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
             next_token = np.argmax(masked)
             name.append(int(next_token))
             i += 1
-        elif state == "PARAM_KEY" and i < len(template_tokens[1]):
-            masked[template_tokens[1][i]] = logits_array[template_tokens[1][i]]
-            next_token = np.argmax(masked)
-            i += 1
         elif state == "PARAM_VALUE" and not param_template:
-            name_stripped = llm.decode(name).replace("\"", "")
+            name_stripped: str = llm.decode(name).replace("\"", "")
             param_template = get_param_template(llm,
                                                 name_stripped,
                                                 functions_definition)
             continue
-        elif state == "PARAM_VALUE" and i < len(param_template[0]):
-            if in_tokens:
+        elif state == "PARAM_VALUE" and param_template:
+            next_token_str: str = llm.decode([int(np.argmax(logits_array))])
+            if in_param_template:
                 if j < len(param_template[0][i]):
                     if j == 0 and llm.decode(generated[-1]).endswith(","):
                         j += 1
                         continue
-                    masked[param_template[0][i][j]] = logits_array[param_template[0][i][j]]
+                    token_id = param_template[0][i][j]
+                    masked[token_id] = logits_array[token_id]
                     next_token = np.argmax(masked)
                     j += 1
                 else:
                     j = 0
-                    in_tokens = False
+                    in_param_template = False
                     next_token = None
             else:
                 if param_template[1][i] == "string":
+                    quote_id: List[int] = llm.encode("\"")[0].tolist()
                     if j == 0:
-                        masked[llm.encode("\"")] = logits_array[llm.encode("\"")]
+                        masked[quote_id] = logits_array[quote_id]
                         next_token = np.argmax(masked)
                         j += 1
-                    elif j > 0 and "\"" in llm.decode([int(np.argmax(logits_array))]):
+                    elif j > 0 and "\"" in next_token_str:
                         j = 0
                         i += 1
-                        in_tokens = True
-                        masked[llm.encode("\"")] = logits_array[llm.encode("\"")]
-                        if llm.decode([int(np.argmax(logits_array))]).startswith("\""):
+                        in_param_template = True
+                        masked[quote_id] = logits_array[quote_id]
+                        if next_token_str.startswith("\""):
                             next_token = np.argmax(masked)
                         else:
                             next_token = np.argmax(logits_array)
@@ -121,32 +137,26 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
                         next_token = np.argmax(logits_array)
                         j += 1
                 elif param_template[1][i] == "number":
-                    if not is_valid_number(llm.decode([int(np.argmax(logits_array))]), j):
+                    if not is_valid_number(next_token_str, j):
                         j = 0
                         i += 1
-                        in_tokens = True
+                        in_param_template = True
                         next_token = None
                     else:
                         next_token = np.argmax(logits_array)
                         j += 1
                 elif param_template[1][i] == "boolean":
-                    bool_list = ["true", "false"]
-                    bool_tokens = encode_list(llm, bool_list)
+                    bool_list: List[str] = ["true", "false"]
+                    bool_tokens: List[List[int]] = encode_list(llm, bool_list)
                     for item in bool_tokens:
                         masked[item] = logits_array[item]
                     next_token = np.argmax(masked)
                     j = 0
                     i += 1
-                    in_tokens = True
-        elif state == "END" and i < len(template_tokens[2]):
-            masked[template_tokens[2][i]] = logits_array[template_tokens[2][i]]
-            next_token = np.argmax(masked)
-            i += 1
-        else:
-            break
+                    in_param_template = True
         if next_token is not None:
             generated.append(int(next_token))
-            full_prompt_tokens_list.append(int(next_token))
+            full_prompt_tokens.append(int(next_token))
         if state == "START" and i >= len(template_tokens[0]):
             state = "NAME"
             i = 0
@@ -156,7 +166,8 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
         elif state == "PARAM_KEY" and i >= len(template_tokens[1]):
             state = "PARAM_VALUE"
             i = 0
-        elif state == "PARAM_VALUE" and i >= len(param_template[0]):
+        elif (state == "PARAM_VALUE" and param_template
+              and i >= len(param_template[0])):
             state = "END"
             i = 0
         elif state == "END" and i >= len(template_tokens[2]):
@@ -166,16 +177,17 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
 
 
 def generate_outfile(functions_definition: List[FunctionsDefinition],
-                     input_prompts: List[InputPrompt], output_path: str) -> None:
-    llm = llm_sdk.Small_LLM_Model()  # type: ignore
-    input_len = len(input_prompts)
-    json_from_file = []
+                     input_prompts: List[InputPrompt], output_path: str
+                     ) -> None:
+    llm: Any = llm_sdk.Small_LLM_Model()  # type: ignore
+    input_len: int = len(input_prompts)
+    json_from_file: List[Dict[str, Any]] = []
     for i, item in enumerate(input_prompts, 1):
         print(f"\nProcessing prompt {i}/{input_len}...")
-        prompt_string = json.dumps(item.prompt)
-        result_string = call_llm(llm, functions_definition, prompt_string)
-        print(result_string)
-        result_json = json.loads(result_string)
+        prompt_string: str = json.dumps(item.prompt)
+        result_string: str = call_llm(llm, functions_definition, prompt_string)
+        result_json: Any = json.loads(result_string)
+        print(json.dumps(result_json, indent=2))
         if not os.path.exists(output_path):
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
         json_from_file.append(result_json)

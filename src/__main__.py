@@ -1,6 +1,7 @@
 import argparse
 from src.parsing import FunctionsDefinition, InputPrompt, parse_infile
 from src.inference import generate_outfile
+from typing import List
 
 
 def main() -> None:
@@ -16,9 +17,10 @@ def main() -> None:
                         default="data/output/function_calls.json",
                         help="path for the output JSON file")
     args = parser.parse_args()
-    functions_definition = parse_infile(args.functions_definition,
-                                        FunctionsDefinition)
-    input_prompts = parse_infile(args.input, InputPrompt)
+    functions_definition: List[FunctionsDefinition] = parse_infile(
+        args.functions_definition,
+        FunctionsDefinition)
+    input_prompts: List[InputPrompt] = parse_infile(args.input, InputPrompt)
     output_path = args.output
     generate_outfile(functions_definition, input_prompts, output_path)
 
