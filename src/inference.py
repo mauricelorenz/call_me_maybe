@@ -129,6 +129,15 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
                     else:
                         next_token = np.argmax(logits_array)
                         j += 1
+                elif param_template[1][i] == "boolean":
+                    bool_list = ["true", "false"]
+                    bool_tokens = encode_list(llm, bool_list)
+                    for item in bool_tokens:
+                        masked[item] = logits_array[item]
+                    next_token = np.argmax(masked)
+                    j = 0
+                    i += 1
+                    in_tokens = True
         elif state == "END" and i < len(template_tokens[2]):
             masked[template_tokens[2][i]] = logits_array[template_tokens[2][i]]
             next_token = np.argmax(masked)
