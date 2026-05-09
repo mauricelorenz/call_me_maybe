@@ -55,6 +55,17 @@ def get_static_tokens(llm: Any,
     return (full_prompt_tokens, template_tokens, fd_name_tokens)
 
 
+def is_unescaped_quote(next_token_str: str, prev_token_str: str) -> bool:
+    if "\"" in next_token_str:
+        quote_index: int = next_token_str.rfind("\"")
+        if prev_token_str.endswith("\\"):
+            return False
+        elif quote_index > 0 and next_token_str[quote_index - 1] == "\\":
+            return False
+        return True
+    return False
+
+
 def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
              prompt_string: str) -> str:
     static_tokens: Tuple[Any, ...] = get_static_tokens(llm,
@@ -118,7 +129,8 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
                         masked[quote_id] = logits_array[quote_id]
                         next_token = np.argmax(masked)
                         j += 1
-                    elif j > 0 and "\"" in next_token_str:
+                    elif (j > 0 and is_unescaped_quote(next_token_str,
+                          llm.decode(generated[-1]))):
                         j = 0
                         i += 1
                         in_param_template = True
