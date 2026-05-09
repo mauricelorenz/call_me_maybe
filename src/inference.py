@@ -210,5 +210,8 @@ def generate_outfile(functions_definition: List[FunctionsDefinition],
             with open(output_path, "w") as f:
                 json.dump(json_from_file, f, indent=2)
         except json.JSONDecodeError as e:
-            print("Error while generating function calls "
+            print("Error while generating function call "
                   f"for prompt '{prompt_string}':\n{e}")
+        except OSError as e:
+            print("Error while writing function call to file "
+                  f"for prompt '{prompt_string}':\n{e.strerror}")
