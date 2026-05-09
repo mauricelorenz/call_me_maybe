@@ -25,18 +25,12 @@ def get_param_template(llm: Any, name: str,
     key_strings: List[str] = []
     for i, key in enumerate(raw_keys):
         if i == 0:
-            key_strings.append(f"\"{key}\": ")
+            key_strings.append(f"\"{key}\":"
+                               f"{'' if types[i] == 'number' else ' '}")
         else:
-            key_strings.append(f", \"{key}\": ")
+            key_strings.append(f", \"{key}\":"
+                               f"{'' if types[i] == 'number' else ' '}")
     return (encode_list(llm, key_strings), types)
-
-
-def is_valid_number(next_token_str: str, j: int) -> bool:
-    if j == 0 and not (next_token_str.isnumeric() or next_token_str == "-"):
-        return False
-    if j > 0 and not (next_token_str.isnumeric() or next_token_str == "."):
-        return False
-    return True
 
 
 def get_static_tokens(llm: Any,
@@ -137,7 +131,15 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
                         next_token = np.argmax(logits_array)
                         j += 1
                 elif param_template[1][i] == "number":
-                    if not is_valid_number(next_token_str, j):
+                    space_minus_id: List[int] = llm.encode(" -")[0].tolist()
+                    space_id: List[int] = llm.encode(" ")[0].tolist()
+                    if j == 0:
+                        masked[space_minus_id] = logits_array[space_minus_id]
+                        masked[space_id] = logits_array[space_id]
+                        next_token = np.argmax(masked)
+                        j += 1
+                    elif not (next_token_str.isnumeric()
+                              or next_token_str == "."):
                         j = 0
                         i += 1
                         in_param_template = True
@@ -184,12 +186,17 @@ def generate_outfile(functions_definition: List[FunctionsDefinition],
     json_from_file: List[Dict[str, Any]] = []
     for i, item in enumerate(input_prompts, 1):
         print(f"\nProcessing prompt {i}/{input_len}...")
-        prompt_string: str = json.dumps(item.prompt)
-        result_string: str = call_llm(llm, functions_definition, prompt_string)
-        result_json: Any = json.loads(result_string)
-        print(json.dumps(result_json, indent=2))
-        if not os.path.exists(output_path):
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        json_from_file.append(result_json)
-        with open(output_path, "w") as f:
-            json.dump(json_from_file, f, indent=2)
+        try:
+            prompt_string: str = json.dumps(item.prompt)
+            result_string: str = call_llm(llm, functions_definition,
+                                          prompt_string)
+            result_json: Any = json.loads(result_string)
+            print(json.dumps(result_json, indent=2))
+            if not os.path.exists(output_path):
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            json_from_file.append(result_json)
+            with open(output_path, "w") as f:
+                json.dump(json_from_file, f, indent=2)
+        except json.JSONDecodeError as e:
+            print("Error while generating function calls "
+                  f"for prompt '{prompt_string}':\n{e}")
