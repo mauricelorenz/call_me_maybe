@@ -55,15 +55,35 @@ def get_static_tokens(llm: Any,
     return (full_prompt_tokens, template_tokens, fd_name_tokens)
 
 
-def is_unescaped_quote(next_token_str: str, prev_token_str: str) -> bool:
-    if "\"" in next_token_str:
-        quote_index: int = next_token_str.rfind("\"")
-        if prev_token_str.endswith("\\"):
-            return False
-        elif quote_index > 0 and next_token_str[quote_index - 1] == "\\":
-            return False
-        return True
-    return False
+def is_valid_token(in_escape_sequence: bool, next_token_str: str,
+                   is_not_last: bool) -> Tuple[bool, bool, bool]:
+    if in_escape_sequence:
+        token_str: str = "\\" + next_token_str
+    else:
+        token_str = next_token_str
+    i: int = 0
+    token_str_len: int = len(token_str)
+    in_escape_sequence = False
+    while i < token_str_len:
+        if in_escape_sequence:
+            if token_str[i] not in "\\\"/bfnrt":
+                return (False, False, False)
+            else:
+                in_escape_sequence = False
+        else:
+            if token_str[i] == "\\":
+                in_escape_sequence = True
+            elif ((i == token_str_len - 1) and (token_str[i] == "\"")) \
+                    or ((is_not_last and i == token_str_len - 2)
+                        and (token_str[i:] == "\",")):
+                if in_escape_sequence:
+                    return (True, False, False)
+                else:
+                    return (True, False, True)
+            elif (i < token_str_len - 1) and (token_str[i] == "\""):
+                return (False, False, False)
+        i += 1
+    return (True, in_escape_sequence, False)
 
 
 def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
@@ -74,15 +94,16 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
     full_prompt_tokens: List[int] = static_tokens[0]
     template_tokens: List[List[int]] = static_tokens[1]
     fd_name_tokens: List[List[int]] = static_tokens[2]
-    max_tokens: int = 100
+    max_tokens: int = 200
     generated: List[int] = []
     name: List[int] = []
     param_template: Optional[Tuple[List[List[int]], List[str]]] = None
-    in_param_template: bool = True
     i: int = 0
     j: int = 0
     state: str = "START"
     template_states: List[str] = ["START", "PARAM_KEY", "END"]
+    in_param_template: bool = True
+    in_escape_sequence: bool = False
     while max_tokens:
         logits: List[float] = llm.get_logits_from_input_ids(full_prompt_tokens)
         logits_array: np.ndarray[Any, np.dtype[Any]] = np.array(logits)
@@ -125,26 +146,43 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
             else:
                 if param_template[1][i] == "string":
                     quote_id: List[int] = llm.encode("\"")[0].tolist()
+                    esc_quote_id: List[int] = llm.encode("\\\"")[0].tolist()
                     if j == 0:
                         masked[quote_id] = logits_array[quote_id]
                         next_token = np.argmax(masked)
                         j += 1
-                    elif (j > 0 and is_unescaped_quote(next_token_str,
-                          llm.decode(generated[-1]))):
-                        j = 0
-                        i += 1
-                        in_param_template = True
-                        masked[quote_id] = logits_array[quote_id]
-                        if next_token_str.startswith("\""):
+                    else:
+                        is_not_last: bool = i < len(param_template[0]) - 1
+                        while True:
+                            result: Tuple[bool, bool, bool] = is_valid_token(
+                                in_escape_sequence, next_token_str, is_not_last
+                                )
+                            token_valid, next_in_esc, string_closed = result
+                            if not token_valid:
+                                logits_array[np.argmax(logits_array)] = -np.inf
+                                curr_max: int = int(np.argmax(logits_array))
+                                next_token_str = llm.decode([curr_max])
+                            else:
+                                next_token = np.argmax(logits_array)
+                                break
+                        if string_closed:
+                            j = 0
+                            i += 1
+                            in_param_template = True
+                            in_escape_sequence = False
+                        elif max_tokens == 2 and not in_escape_sequence:
+                            masked[quote_id] = logits_array[quote_id]
+                            next_token = np.argmax(masked)
+                        elif max_tokens == 2 and in_escape_sequence:
+                            masked[esc_quote_id] = logits_array[esc_quote_id]
                             next_token = np.argmax(masked)
                         else:
-                            next_token = np.argmax(logits_array)
-                    else:
-                        next_token = np.argmax(logits_array)
-                        j += 1
+                            j += 1
+                        in_escape_sequence = next_in_esc
                 elif param_template[1][i] == "number":
                     space_minus_id: List[int] = llm.encode(" -")[0].tolist()
                     space_id: List[int] = llm.encode(" ")[0].tolist()
+                    dummy_id: List[int] = llm.encode("0")[0].tolist()
                     if j == 0:
                         masked[space_minus_id] = logits_array[space_minus_id]
                         masked[space_id] = logits_array[space_id]
@@ -156,6 +194,9 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
                         i += 1
                         in_param_template = True
                         next_token = None
+                    elif max_tokens == 2:
+                        masked[dummy_id] = logits_array[dummy_id]
+                        next_token = np.argmax(masked)
                     else:
                         next_token = np.argmax(logits_array)
                         j += 1
@@ -181,7 +222,7 @@ def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
             state = "PARAM_VALUE"
             i = 0
         elif (state == "PARAM_VALUE" and param_template
-              and i >= len(param_template[0])):
+              and i >= len(param_template[0])) or max_tokens == 2:
             state = "END"
             i = 0
         elif state == "END" and i >= len(template_tokens[2]):
