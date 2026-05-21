@@ -1,108 +1,112 @@
 import json
-from typing import Optional, Tuple, List, Dict, Any
+from typing import List, Any
 import llm_sdk
 import numpy as np
 import os
 from src.parsing import FunctionsDefinition, InputPrompt
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel
 
 
-class State(BaseModel):
-    main_states: List[str] = Field(default_factory=lambda:
-                                   ["START", "PROMPT_KEY",
-                                   "PROMPT_VALUE", "NAME_KEY",
-                                   "NAME_VALUE", "PARAM_KEY",
-                                   "PARAM_VALUE", "END"])
-    param_states: List[str] = Field(default_factory=list)
-    curr_main_state: int = 0
-    curr_param_state: int = 0
-    curr_token_index: int = 0
-    in_string: bool = False
-    in_escape: bool = False
-
-    def get_state(self) -> Tuple[str, str]:
-        return (self.main_states[self.curr_main_state],
-                self.param_states[self.curr_param_state]
-                if self.param_states else "")
-
-    def next_state(self, choice: str) -> None:
-        if choice == "main":
-            self.curr_token_index = 0
-            self.curr_main_state += 1
-        elif choice == "param":
-            self.curr_token_index = 0
-            self.curr_param_state += 1
-        elif choice == "token":
-            self.curr_token_index += 1
-        else:
-            raise ValueError(f"Unknown choice: {choice}")
-
-
-class GenerationContext(BaseModel):
-    full_prompt_tokens: List[int]
-    structure_tokens: Dict[str, List[int]]
+class FunctionsContext(BaseModel):
+    prompt_tokens: List[int]
     functions_tokens: List[List[int]]
-    param_tokens: List[List[int]] = Field(default_factory=list)
-    param_types: List[str] = Field(default_factory=list)
 
 
-def get_generation_context(llm: Any, functions_definition: List[FunctionsDefinition], prompt_string: str) -> GenerationContext:
+class ParametersContext(BaseModel):
+    prompt_tokens: List[int]
+    param_tokens: List[List[int]]
+    param_types: List[str]
+
+
+def get_functions_context(
+    llm: Any,
+    functions_definition: List[FunctionsDefinition],
+    prompt_string: str
+) -> FunctionsContext:
     fd_string = json.dumps([fd.model_dump() for fd
-                                in functions_definition])
-    full_prompt = ("Pick a function matching the question "
-                        f"'{prompt_string}' out of the following: "
-                        f"{fd_string} and return only a JSON containing "
-                        "prompt, name and the parameters. If you generate "
-                        "a regular expression, make sure it matches the "
-                        "requested syntax.")
+                            in functions_definition])
+    full_prompt = ("Pick the function matching the prompt "
+                   f"'{prompt_string}' out of the following:\n\n"
+                   f"{fd_string}\n\nReturn only the name.")
     full_prompt_tokens = llm.encode(full_prompt)[0].tolist()
-    structure_dict = {"START": "{",
-                      "PROMPT_KEY": "\"prompt\":",
-                      "PROMPT_VALUE": prompt_string,
-                      "NAME_KEY": "\"name\":",
-                      "PARAM_KEY": "\"parameters\":",
-                      "END": "}"}
-    structure_tokens = {}
-    for item in structure_dict:
-        structure_tokens[item] = llm.encode(structure_dict[item])[0].tolist()
     functions_tokens = []
     for item in functions_definition:
         functions_tokens.append(llm.encode(item.name)[0].tolist())
-    return GenerationContext(full_prompt_tokens=full_prompt_tokens, structure_tokens=structure_tokens, functions_tokens=functions_tokens)
+    return FunctionsContext(prompt_tokens=full_prompt_tokens,
+                            functions_tokens=functions_tokens)
 
 
-def get_next_token(state: State, logits: np.ndarray, generation_context: GenerationContext) -> int:
-    main_state, param_state = state.get_state()
-    if main_state == "START":
-        return int(np.argmax(logits))
+def get_parameters_context(
+    llm: Any,
+    functions_definition: List[FunctionsDefinition],
+    prompt_string: str,
+    function_name: str
+) -> ParametersContext:
+    for fd in functions_definition:
+        if fd.name == function_name:
+            function = fd
+            break
+    fn_string = json.dumps(function.model_dump())
+    full_prompt = ("Extract the parameters matching the definition in "
+                   f"{fn_string} out of the prompt '{prompt_string}' "
+                   "and only return only a valid JSON object")
+    full_prompt_tokens = llm.encode(full_prompt)[0].tolist()
+    param_keys = [key for key in function.parameters]
+    param_tokens = []
+    for key in param_keys:
+        param_tokens.append(llm.encode(key)[0].tolist())
+    param_types = [function.parameters[key]["type"]
+                   for key in function.parameters]
+    return ParametersContext(prompt_tokens=full_prompt_tokens,
+                             param_tokens=param_tokens,
+                             param_types=param_types)
 
 
-def call_llm(llm: Any, functions_definition: List[FunctionsDefinition],
-             prompt_string: str) -> str:
-    state = State()
-    max_tokens = 100
-    generation_context = get_generation_context(llm, functions_definition, prompt_string)
-    generated = []
-    while max_tokens:
-        logits = np.array(llm.get_logits_from_input_ids(generation_context.full_prompt_tokens + generated))
-        token = get_next_token(state, logits, generation_context)
-        generated.append(token)
-        max_tokens -= 1
-    return llm.decode(generated)
+def get_function_name(llm: Any, functions_context: FunctionsContext) -> str:
+    i = 0
+    max_tokens = len(max(functions_context.functions_tokens, key=len))
+    generated: List[int] = []
+    while i < max_tokens:
+        logits_base = functions_context.prompt_tokens + generated
+        logits = np.array(llm.get_logits_from_input_ids(logits_base))
+        masked = np.full(len(logits), -np.inf)
+        for tokens in functions_context.functions_tokens:
+            if not generated or (len(tokens) > i
+                                 and tokens[i - 1] == generated[i - 1]):
+                masked[tokens[i]] = logits[tokens[i]]
+        generated.append(int(np.argmax(masked)))
+        if generated in functions_context.functions_tokens:
+            break
+        i += 1
+    return str(llm.decode(generated))
 
 
-def generate_outfile(functions_definition: List[FunctionsDefinition],
-                     input_prompts: List[InputPrompt], output_path: str
-                     ) -> None:
-    llm = llm_sdk.Small_LLM_Model()
+def get_result_object(
+    llm: Any,
+    functions_definition: List[FunctionsDefinition],
+    prompt_string: str
+) -> str:
+    functions_context = get_functions_context(llm,
+                                              functions_definition,
+                                              prompt_string)
+    function_name = get_function_name(llm, functions_context)
+    return function_name
+
+
+def generate_outfile(
+    functions_definition: List[FunctionsDefinition],
+    input_prompts: List[InputPrompt],
+    output_path: str
+) -> None:
+    llm = llm_sdk.Small_LLM_Model()  # type: ignore
     input_len = len(input_prompts)
     json_from_file = []
     for i, item in enumerate(input_prompts, 1):
         print(f"\nProcessing prompt {i}/{input_len}...")
         try:
             prompt_string = json.dumps(item.prompt)
-            result_string = call_llm(llm, functions_definition,
-                                          prompt_string)
+            result_string = get_result_object(llm, functions_definition,
+                                              prompt_string)
             result_json = json.loads(result_string)
             print(json.dumps(result_json, indent=2))
             if not os.path.exists(output_path):
@@ -110,10 +114,12 @@ def generate_outfile(functions_definition: List[FunctionsDefinition],
             json_from_file.append(result_json)
             with open(output_path, "w") as f:
                 json.dump(json_from_file, f, indent=2)
-        except json.JSONDecodeError as e:
-            print(result_string)  ######################################################################## DEBUG
-            print("Error while generating function call "
-                  f"for prompt '{prompt_string}':\n{e}")
-        except OSError as e:
-            print("Error while writing function call to file "
-                  f"for prompt '{prompt_string}':\n{e.strerror}")
+        # except json.JSONDecodeError as e:
+        #     print("Error while generating function call "
+        #           f"for prompt '{prompt_string}':\n{e}")
+        # except OSError as e:
+        #     print("Error while writing function call to file "
+        #           f"for prompt '{prompt_string}':\n{e.strerror}")
+        except Exception:
+            print(item)
+            print(result_string)  # ##################################### DEBUG
