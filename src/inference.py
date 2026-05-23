@@ -18,6 +18,19 @@ class ParametersContext(BaseModel):
     param_types: List[str]
 
 
+class State(BaseModel):
+    param_index: int = 0
+    token_index: int = 0
+    start: bool = True
+    in_key: bool = False
+    in_value: bool = False
+    value_done: bool = False
+    end: bool = False
+    done: bool = False
+    in_string: bool = False
+    in_escape: bool = False
+
+
 def get_functions_context(
     llm: Any,
     functions_definition: List[FunctionsDefinition],
@@ -48,13 +61,13 @@ def get_parameters_context(
             break
     fn_string = json.dumps(function.model_dump())
     full_prompt = ("Extract the parameters matching the definition in "
-                   f"{fn_string} out of the prompt '{prompt_string}' "
-                   "and only return only a valid JSON object")
+                   f"{fn_string} out of the prompt '{prompt_string}'. "
+                   "Only return a valid JSON object.")
     full_prompt_tokens = llm.encode(full_prompt)[0].tolist()
     param_keys = [key for key in function.parameters]
     param_tokens = []
     for key in param_keys:
-        param_tokens.append(llm.encode(key)[0].tolist())
+        param_tokens.append(llm.encode(f"\"{key}\":")[0].tolist())
     param_types = [function.parameters[key]["type"]
                    for key in function.parameters]
     return ParametersContext(prompt_tokens=full_prompt_tokens,
@@ -81,6 +94,115 @@ def get_function_name(llm: Any, functions_context: FunctionsContext) -> str:
     return str(llm.decode(generated))
 
 
+def get_next_state(parameters_context: ParametersContext, state: State) -> None:
+    if state.start:
+        state.start = False
+        state.in_key = True
+    elif state.in_key and state.token_index == len(parameters_context.param_tokens[state.param_index]):
+        state.token_index = 0
+        state.in_key = False
+        state.in_value = True
+    elif state.in_value and state.value_done and state.param_index == len(parameters_context.param_tokens) - 1:
+        state.value_done = False
+        state.in_value = False
+        state.end = True
+    elif state.in_value and state.value_done:
+        state.param_index += 1
+        state.token_index = 0
+        state.value_done = False
+        state.in_value = False
+        state.in_key = True
+    elif state.end:
+        state.end = False
+        state.done = True
+
+
+def enforce_tokens(llm: Any, to_enforce: List[str], logits: np.ndarray, masked: np.ndarray) -> int:
+    for raw_token in to_enforce:
+        token = llm.encode(raw_token)[0].tolist()
+        masked[token] = logits[token]
+    return np.argmax(masked)
+
+
+def validate_token(token_str: str, state: State) -> bool:
+    if state.in_escape:
+        token_str = "\\" + token_str
+    state.in_escape = False
+    i = 0
+    token_str_len = len(token_str)
+    while i < token_str_len:
+        if state.in_escape:
+            if token_str[i] in "\\\"/bfnrt":
+                state.in_escape = False
+                i += 1
+                continue
+            else:
+                return False
+        elif token_str[i] == "\\":
+            state.in_escape = True
+            i += 1
+            continue
+
+
+def get_next_token(llm: Any, parameters_context: ParametersContext, state: State, logits: np.ndarray) -> int | None:
+    masked = np.full(len(logits), -np.inf)
+    next_token = None
+    if state.start:
+        token = llm.encode("{")
+        masked[token] = logits[token]
+        next_token = np.argmax(masked)
+    elif state.in_key:
+        token = parameters_context.param_tokens[state.param_index][state.token_index]
+        masked[token] = logits[token]
+        next_token = np.argmax(masked)
+        state.token_index += 1
+    elif state.in_value:
+        probable_token_str = llm.decode([int(np.argmax(logits))])
+        if parameters_context.param_types[state.param_index] == "number":
+            if state.token_index == 0:
+                next_token = enforce_tokens(llm, [" ", "-", " -"], logits, masked)
+            elif probable_token_str.isnumeric() or probable_token_str == ".":
+                next_token = np.argmax(logits)
+            else:
+                if state.param_index < len(parameters_context.param_tokens) - 1:
+                    next_token = enforce_tokens(llm, [",", ", ", " ,", " , "], logits, masked)
+                state.value_done = True
+        elif parameters_context.param_types[state.param_index] == "string":
+            if state.token_index == 0:
+                next_token = enforce_tokens(llm, ["\"", " \""], logits, masked)
+                state.in_string = True
+            else:
+                while True:
+                    is_valid_token = validate_token(llm.decode(int[np.argmax(logits)]), state)
+                    if is_valid_token:
+                        break
+                    logits[np.argmax(logits)] = -np.inf
+        state.token_index += 1
+    elif state.end:
+        token = llm.encode("}")
+        masked[token] = logits[token]
+        next_token = np.argmax(masked)
+    get_next_state(parameters_context, state)
+    return next_token
+
+
+def get_parameters(llm: Any, parameters_context: ParametersContext) -> str:
+    state = State()
+    i = 0
+    max_tokens = 100
+    generated: List[int] = []
+    while i < max_tokens:
+        logits_base = parameters_context.prompt_tokens + generated
+        logits = np.array(llm.get_logits_from_input_ids(logits_base))
+        token = get_next_token(llm, parameters_context, state, logits)
+        if token is not None:
+            generated.append(token)
+        if state.done:
+            break
+        i += 1
+    return str(llm.decode(generated))
+
+
 def get_result_object(
     llm: Any,
     functions_definition: List[FunctionsDefinition],
@@ -90,7 +212,12 @@ def get_result_object(
                                               functions_definition,
                                               prompt_string)
     function_name = get_function_name(llm, functions_context)
-    return function_name
+    parameters_context = get_parameters_context(llm,
+                                                functions_definition,
+                                                prompt_string,
+                                                function_name)
+    parameters = get_parameters(llm, parameters_context)
+    return (function_name, parameters)
 
 
 def generate_outfile(
