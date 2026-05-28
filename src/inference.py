@@ -134,14 +134,14 @@ def validate_token(token_str: str, state: State) -> bool:
         if state.in_escape:
             if token_str[i] in "\\\"/bfnrt":
                 state.in_escape = False
-                i += 1
-                continue
             else:
                 return False
         elif token_str[i] == "\\":
             state.in_escape = True
-            i += 1
-            continue
+        elif token_str[i] == "\"" and i < token_str_len - 1:
+            return False
+        i += 1
+    return True
 
 
 def get_next_token(llm: Any, parameters_context: ParametersContext, state: State, logits: np.ndarray) -> int | None:
@@ -171,12 +171,21 @@ def get_next_token(llm: Any, parameters_context: ParametersContext, state: State
             if state.token_index == 0:
                 next_token = enforce_tokens(llm, ["\"", " \""], logits, masked)
                 state.in_string = True
-            else:
+            elif state.in_string:
                 while True:
+                    # print(np.argmax(logits),":", llm.decode([int(np.argmax(logits))]))  # ############################## DEBUG
                     is_valid_token = validate_token(llm.decode([int(np.argmax(logits))]), state)
+                    # print(is_valid_token)  # ############################## DEBUG
                     if is_valid_token:
+                        next_token = np.argmax(logits)
                         break
                     logits[np.argmax(logits)] = -np.inf
+                if llm.decode([int(np.argmax(logits))]).endswith("\"") and not state.in_escape:
+                    state.in_string = False
+            else:
+                if state.param_index < len(parameters_context.param_tokens) - 1:
+                    next_token = enforce_tokens(llm, [",", ", ", " ,", " , "], logits, masked)
+                state.value_done = True
         state.token_index += 1
     elif state.end:
         token = llm.encode("}")
