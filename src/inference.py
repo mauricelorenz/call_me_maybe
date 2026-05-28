@@ -173,7 +173,7 @@ def get_next_token(llm: Any, parameters_context: ParametersContext, state: State
                 state.in_string = True
             else:
                 while True:
-                    is_valid_token = validate_token(llm.decode(int[np.argmax(logits)]), state)
+                    is_valid_token = validate_token(llm.decode([int(np.argmax(logits))]), state)
                     if is_valid_token:
                         break
                     logits[np.argmax(logits)] = -np.inf
