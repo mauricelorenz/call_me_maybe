@@ -186,6 +186,16 @@ def get_next_token(llm: Any, parameters_context: ParametersContext, state: State
                 if state.param_index < len(parameters_context.param_tokens) - 1:
                     next_token = enforce_tokens(llm, [",", ", ", " ,", " , "], logits, masked)
                 state.value_done = True
+        elif parameters_context.param_types[state.param_index] == "boolean":
+            if state.token_index == 0:
+                bool_tokens = [llm.encode(item) for item in ["true", "false"]]
+                for token in bool_tokens:
+                    masked[token] = logits[token]
+                next_token = np.argmax(masked)
+            else:
+                if state.param_index < len(parameters_context.param_tokens) - 1:
+                    next_token = enforce_tokens(llm, [",", ", ", " ,", " , "], logits, masked)
+                state.value_done = True
         state.token_index += 1
     elif state.end:
         token = llm.encode("}")
