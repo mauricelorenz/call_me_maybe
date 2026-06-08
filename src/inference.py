@@ -254,9 +254,8 @@ def generate_outfile(
     for i, item in enumerate(input_prompts, 1):
         print(f"\nProcessing prompt {i}/{input_len}...")
         try:
-            prompt_string = json.dumps(item.prompt)
             result_string = get_result_object(llm, functions_definition,
-                                              prompt_string)
+                                              item.prompt)
             result_json = json.loads(result_string)
             print(json.dumps(result_json, indent=2))
             if not os.path.exists(output_path):
