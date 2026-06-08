@@ -60,9 +60,10 @@ def get_parameters_context(
             function = fd
             break
     fn_string = json.dumps(function.model_dump())
-    full_prompt = ("Extract the parameters matching the definition in "
-                   f"{fn_string} out of the prompt '{prompt_string}'. "
-                   "Only return a valid JSON object.")
+    full_prompt = (f"Given the function '{function_name}' with definition "
+        f"'{fn_string}', extract the arguments from the prompt "
+        f"'{prompt_string}'. Return only a valid JSON object with the "
+        "parameter values.")
     full_prompt_tokens = llm.encode(full_prompt)[0].tolist()
     param_keys = [key for key in function.parameters]
     param_tokens = []
@@ -125,6 +126,7 @@ def enforce_tokens(llm: Any, to_enforce: List[str], logits: np.ndarray, masked: 
 
 
 def validate_token(token_str: str, state: State) -> bool:
+    orig_in_escape = state.in_escape
     if state.in_escape:
         token_str = "\\" + token_str
     state.in_escape = False
@@ -135,10 +137,12 @@ def validate_token(token_str: str, state: State) -> bool:
             if token_str[i] in "\\\"/bfnrt":
                 state.in_escape = False
             else:
+                state.in_escape = orig_in_escape
                 return False
         elif token_str[i] == "\\":
             state.in_escape = True
         elif token_str[i] == "\"" and i < token_str_len - 1:
+            state.in_escape = orig_in_escape
             return False
         i += 1
     return True
