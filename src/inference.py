@@ -1,10 +1,14 @@
 import json
-from typing import List, Any
+from typing import List, Any, Tuple, Dict
 import llm_sdk
 import numpy as np
 import os
 from src.parsing import FunctionsDefinition, InputPrompt
 from pydantic import BaseModel
+import re
+
+
+NUMERIC_REGEX = re.compile(r"^[0-9.\-eE\s]+$")
 
 
 class FunctionsContext(BaseModel):
@@ -30,6 +34,28 @@ class State(BaseModel):
     in_string: bool = False
     in_escape: bool = False
     ends_with_comma: bool = False
+
+
+def load_vocabulary_mappings(
+    llm: Any
+) -> Tuple[Dict[int, str], Dict[str, List[int]]]:
+    vocab_path = llm.get_path_to_vocabulary_json()
+    with open(vocab_path) as f:
+        vocab = json.load(f)
+    id_to_str = {}
+    categories: Dict[str, List[int]] = {"number": [],
+                                        "boolean": [],
+                                        "string_safe": []}
+    for token_str, token_id in vocab.items():
+        clean_str = token_str.replace("\u0120", " ")
+        id_to_str[token_id] = clean_str
+        if NUMERIC_REGEX.match(clean_str) and clean_str.strip():
+            categories["number"].append(token_id)
+        if clean_str.strip().lower() in ["true", "false"]:
+            categories["boolean"].append(token_id)
+        if "\"" not in clean_str:
+            categories["string_safe"].append(token_id)
+    return id_to_str, categories
 
 
 def get_functions_context(
@@ -62,9 +88,9 @@ def get_parameters_context(
             break
     fn_string = json.dumps(function.model_dump())
     full_prompt = (f"Given the function '{function_name}' with definition "
-        f"'{fn_string}', extract the arguments from the prompt "
-        f"'{prompt_string}'. Return only a valid JSON object with the "
-        "parameter values.")
+                   f"'{fn_string}', extract the arguments from the prompt "
+                   f"'{prompt_string}'. Return only a valid JSON object with "
+                   "the parameter values.")
     full_prompt_tokens = llm.encode(full_prompt)[0].tolist()
     param_keys = [key for key in function.parameters]
     param_tokens = []
@@ -96,15 +122,20 @@ def get_function_name(llm: Any, functions_context: FunctionsContext) -> str:
     return str(llm.decode(generated))
 
 
-def get_next_state(parameters_context: ParametersContext, state: State) -> None:
+def get_next_state(
+    parameters_context: ParametersContext,
+    state: State
+) -> None:
     if state.start:
         state.start = False
         state.in_key = True
-    elif state.in_key and state.token_index == len(parameters_context.param_tokens[state.param_index]):
+    elif state.in_key and state.token_index == len(
+            parameters_context.param_tokens[state.param_index]):
         state.token_index = 0
         state.in_key = False
         state.in_value = True
-    elif state.in_value and state.value_done and state.param_index == len(parameters_context.param_tokens) - 1:
+    elif state.in_value and state.value_done and state.param_index == len(
+            parameters_context.param_tokens) - 1:
         state.value_done = False
         state.in_value = False
         state.end = True
@@ -119,7 +150,12 @@ def get_next_state(parameters_context: ParametersContext, state: State) -> None:
         state.done = True
 
 
-def enforce_tokens(llm: Any, to_enforce: List[str], logits: np.ndarray, masked: np.ndarray) -> int:
+def enforce_tokens(
+    llm: Any,
+    to_enforce: List[str],
+    logits: np.ndarray,
+    masked: np.ndarray
+) -> np.signedinteger:
     for raw_token in to_enforce:
         token = llm.encode(raw_token)[0].tolist()
         masked[token] = logits[token]
@@ -142,22 +178,29 @@ def validate_token(token_str: str, state: State, is_not_last: bool) -> bool:
                 return False
         elif token_str[i] == "\\":
             state.in_escape = True
-        elif token_str[i] == "\"" and token_str[i:] not in (["\"", "\","] if is_not_last else ["\""]):
+        elif token_str[i] == "\"" and token_str[i:] not in (
+                ["\"", "\","] if is_not_last else ["\""]):
             state.in_escape = orig_in_escape
             return False
         i += 1
     return True
 
 
-def get_next_token(llm: Any, parameters_context: ParametersContext, state: State, logits: np.ndarray) -> int | None:
+def get_next_token(
+    llm: Any,
+    parameters_context: ParametersContext,
+    state: State,
+    logits: np.ndarray
+) -> np.signedinteger | None:
     masked = np.full(len(logits), -np.inf)
-    next_token = None
+    next_token: np.signedinteger | None = None
     if state.start:
         token = llm.encode("{")
         masked[token] = logits[token]
         next_token = np.argmax(masked)
     elif state.in_key:
-        token = parameters_context.param_tokens[state.param_index][state.token_index]
+        token = parameters_context.param_tokens[state.param_index][
+            state.token_index]
         masked[token] = logits[token]
         next_token = np.argmax(masked)
         state.token_index += 1
@@ -165,12 +208,15 @@ def get_next_token(llm: Any, parameters_context: ParametersContext, state: State
         probable_token_str = llm.decode([int(np.argmax(logits))])
         if parameters_context.param_types[state.param_index] == "number":
             if state.token_index == 0:
-                next_token = enforce_tokens(llm, [" ", "-", " -"], logits, masked)
+                next_token = enforce_tokens(llm, [" ", "-", " -"],
+                                            logits, masked)
             elif probable_token_str.isnumeric() or probable_token_str == ".":
                 next_token = np.argmax(logits)
             else:
-                if state.param_index < len(parameters_context.param_tokens) - 1:
-                    next_token = enforce_tokens(llm, [",", " ,"], logits, masked)
+                if state.param_index < len(
+                        parameters_context.param_tokens) - 1:
+                    next_token = enforce_tokens(
+                        llm, [",", " ,"], logits, masked)
                 state.value_done = True
         elif parameters_context.param_types[state.param_index] == "string":
             if state.token_index == 0:
@@ -178,20 +224,27 @@ def get_next_token(llm: Any, parameters_context: ParametersContext, state: State
                 state.in_string = True
             elif state.in_string:
                 while True:
-                    is_valid_token = validate_token(llm.decode([int(np.argmax(logits))]), state, state.param_index < len(parameters_context.param_tokens) - 1)
+                    is_valid_token = validate_token(
+                        llm.decode([int(np.argmax(logits))]), state,
+                        state.param_index < len(
+                            parameters_context.param_tokens) - 1)
                     if is_valid_token:
                         next_token = np.argmax(logits)
                         break
                     logits[np.argmax(logits)] = -np.inf
-                if llm.decode([int(np.argmax(logits))]).endswith(("\"", "\",")) and not state.in_escape:
+                if llm.decode([int(np.argmax(logits))]).endswith(
+                        ("\"", "\",")) and not state.in_escape:
                     state.in_string = False
                 if llm.decode([int(np.argmax(logits))]).endswith(","):
                     state.ends_with_comma = True
                 else:
                     state.ends_with_comma = False
             else:
-                if state.param_index < len(parameters_context.param_tokens) - 1 and not state.ends_with_comma:
-                    next_token = enforce_tokens(llm, [",", " ,"], logits, masked)
+                if (state.param_index < len(
+                        parameters_context.param_tokens) - 1
+                        and not state.ends_with_comma):
+                    next_token = enforce_tokens(
+                        llm, [",", " ,"], logits, masked)
                 state.ends_with_comma = False
                 state.value_done = True
         elif parameters_context.param_types[state.param_index] == "boolean":
@@ -201,8 +254,10 @@ def get_next_token(llm: Any, parameters_context: ParametersContext, state: State
                     masked[token] = logits[token]
                 next_token = np.argmax(masked)
             else:
-                if state.param_index < len(parameters_context.param_tokens) - 1:
-                    next_token = enforce_tokens(llm, [",", " ,"], logits, masked)
+                if state.param_index < len(
+                        parameters_context.param_tokens) - 1:
+                    next_token = enforce_tokens(
+                        llm, [",", " ,"], logits, masked)
                 state.value_done = True
         state.token_index += 1
     elif state.end:
@@ -217,7 +272,7 @@ def get_parameters(llm: Any, parameters_context: ParametersContext) -> str:
     state = State()
     i = 0
     max_tokens = 100
-    generated: List[int] = []
+    generated: List[np.signedinteger] = []
     while i < max_tokens:
         logits_base = parameters_context.prompt_tokens + generated
         logits = np.array(llm.get_logits_from_input_ids(logits_base))
@@ -244,7 +299,7 @@ def get_result_object(
                                                 prompt_string,
                                                 function_name)
     parameters = get_parameters(llm, parameters_context)
-    return (function_name, parameters)
+    return f"{function_name}: {parameters}"
 
 
 def generate_outfile(
