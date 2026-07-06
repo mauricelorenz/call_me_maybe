@@ -9,6 +9,7 @@ import re
 
 
 NUMERIC_REGEX = re.compile(r"^[0-9.\-eE\s]+$")
+INTEGER_REGEX = re.compile(r"^[0-9\-]+$")
 
 
 class FunctionsContext(BaseModel):
@@ -31,21 +32,29 @@ def load_vocab_mappings(
     id_to_str = {}
     categories: Dict[str, List[int]] = {"number": [],
                                         "integer": [],
+                                        "number_end": [],
                                         "boolean": [],
                                         "string_safe": [],
+                                        "quote": [],
                                         "escape": []}
     for token_str, token_id in vocab.items():
         clean_str = token_str.replace("\u0120", " ")
         id_to_str[token_id] = clean_str
-        if NUMERIC_REGEX.match(clean_str) and clean_str.strip():
+        if (NUMERIC_REGEX.match(clean_str)
+                and clean_str.strip() and len(clean_str) == 1):
             categories["number"].append(token_id)
-        if clean_str.isnumeric():
+        if (INTEGER_REGEX.match(clean_str)
+                and clean_str.strip() and len(clean_str) == 1):
             categories["integer"].append(token_id)
-        if clean_str.strip().lower() in ["true", "false"]:
+        if clean_str.strip() in [",", "}"]:
+            categories["number_end"].append(token_id)
+        if clean_str.strip() in ["true", "false"]:
             categories["boolean"].append(token_id)
         if "\"" not in clean_str:
             categories["string_safe"].append(token_id)
-        if clean_str in "\"\\/bfnrt":
+        if clean_str == "\"" or clean_str == " \"":
+            categories["quote"].append(token_id)
+        if clean_str in "\"\\/bfnrt" and len(clean_str) == 1:
             categories["escape"].append(token_id)
     return id_to_str, categories
 
@@ -138,6 +147,10 @@ def apply_mask(
     return masked
 
 
+def get_next_state(state: str, token_str: str) -> str:
+    return "pass"
+
+
 def get_result_json(
     llm: Any,
     functions_definition: List[FunctionsDefinition],
@@ -155,7 +168,9 @@ def get_result_json(
     state = "START"
     i = 0
     max_tokens = 100
-    generated: List[np.signedinteger] = []
+    generated = llm.encode(f"{{\"prompt\": \"{prompt_string}\", "
+                           f"\"name\": \"{function_name}\", "
+                           f"\"parameters\": {{")
     while i < max_tokens:
         logits_base = parameters_context.prompt_tokens + generated
         logits = np.array(llm.get_logits_from_input_ids(logits_base))
@@ -180,7 +195,7 @@ def generate_outfile(
         print(f"\nProcessing prompt {i}/{input_len}...")
         try:
             result_string = get_result_json(llm, functions_definition,
-                                              item.prompt)
+                                            item.prompt)
             result_json = json.loads(result_string)
             print(json.dumps(result_json, indent=2))
             if not os.path.exists(output_path):
