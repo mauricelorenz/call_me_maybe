@@ -46,7 +46,7 @@ def load_vocab_mappings(
         if (INTEGER_REGEX.match(clean_str)
                 and clean_str.strip() and len(clean_str) == 1):
             categories["integer"].append(token_id)
-        if clean_str.strip() in [",", "}"]:
+        if clean_str.strip() in [",", "}", "}}"]:
             categories["number_end"].append(token_id)
         if clean_str.strip() in ["true", "false"]:
             categories["boolean"].append(token_id)
@@ -90,8 +90,7 @@ def get_parameters_context(
     fn_string = json.dumps(function.model_dump())
     full_prompt = (f"Given the function '{function_name}' with definition "
                    f"'{fn_string}', extract the arguments from the prompt "
-                   f"'{prompt_string}'. Return only a valid JSON object with "
-                   "the parameter values.")
+                   f"'{prompt_string}'. Return only a valid JSON object.\n\n")
     full_prompt_tokens = llm.encode(full_prompt)[0].tolist()
     param_keys = [key for key in function.parameters]
     param_tokens = []
@@ -113,29 +112,13 @@ def get_function_name(llm: Any, functions_context: FunctionsContext) -> str:
         logits = np.array(llm.get_logits_from_input_ids(logits_base))
         masked = np.full(len(logits), -np.inf)
         for tokens in functions_context.functions_tokens:
-            if not generated or (len(tokens) > i
-                                 and tokens[i - 1] == generated[i - 1]):
+            if (len(tokens) > i and tokens[:i] == generated[:i]):
                 masked[tokens[i]] = logits[tokens[i]]
         generated.append(int(np.argmax(masked)))
         if generated in functions_context.functions_tokens:
             break
         i += 1
     return str(llm.decode(generated))
-
-
-def get_mask(state: str, categories: Dict[str, List[int]]) -> List[int]:
-    if state == "IN_NUMBER":
-        return categories["number"]
-    elif state == "IN_INTEGER":
-        return categories["integer"]
-    elif state == "IN_BOOLEAN":
-        return categories["boolean"]
-    elif state == "IN_STRING":
-        return categories["string_safe"]
-    elif state == "IN_ESCAPE":
-        return categories["escape"]
-    else:
-        raise ValueError(f"Unknown state: {state}")
 
 
 def apply_mask(
@@ -147,8 +130,41 @@ def apply_mask(
     return masked
 
 
-def get_next_state(state: str, token_str: str) -> str:
-    return "pass"
+def generate_value(
+    llm: Any,
+    context_tokens: List[int],
+    candidate_ids: List[int],
+    stop_ids: List[int],
+    max_tokens: int
+) -> List[int]:
+    generated_value: List[int] = []
+    i = 0
+    while i < max_tokens:
+        logits = np.array(llm.get_logits_from_input_ids(context_tokens
+                                                        + generated_value))
+        masked_logits = apply_mask(candidate_ids + stop_ids, logits)
+        next_token = np.argmax(masked_logits)
+        if next_token in stop_ids:
+            break
+        generated_value.append(int(next_token))
+        i += 1
+    return generated_value
+
+
+def get_ids(
+    categories: Dict[str, List[int]],
+    param_type: str
+) -> Tuple[List[int], List[int], int]:
+    if param_type == "number":
+        return (categories["number"], categories["number_end"], 30)
+    elif param_type == "integer":
+        return (categories["integer"], categories["number_end"], 30)
+    elif param_type == "string":
+        return (categories["string_safe"], categories["quote"], 100)
+    elif param_type == "boolean":
+        return (categories["boolean"], [], 1)
+    else:
+        raise ValueError(f"Unknown parameter type: {param_type}")
 
 
 def get_result_json(
@@ -165,20 +181,28 @@ def get_result_json(
                                                 prompt_string,
                                                 function_name)
     id_to_str, categories = load_vocab_mappings(llm)
-    state = "START"
-    i = 0
-    max_tokens = 100
     generated = llm.encode(f"{{\"prompt\": \"{prompt_string}\", "
                            f"\"name\": \"{function_name}\", "
-                           f"\"parameters\": {{")
-    while i < max_tokens:
-        logits_base = parameters_context.prompt_tokens + generated
-        logits = np.array(llm.get_logits_from_input_ids(logits_base))
-        mask = get_mask(state, categories)
-        masked_logits = apply_mask(mask, logits)  # noqa: F841
-        # TODO: add sampling, fix literals and state transition
-        if state == "DONE":
-            break
+                           f"\"parameters\": {{")[0].tolist()
+    i = 0
+    while i < len(parameters_context.param_types):
+        generated += parameters_context.param_tokens[i]
+        context_tokens = parameters_context.prompt_tokens + generated
+        candidate_ids, stop_ids, max_tokens = get_ids(
+            categories,
+            parameters_context.param_types[i]
+        )
+        generated += generate_value(
+            llm,
+            context_tokens,
+            candidate_ids,
+            stop_ids,
+            max_tokens
+        )
+        if i < len(parameters_context.param_types) - 1:
+            generated += llm.encode(",")[0].tolist()
+        else:
+            generated += llm.encode("}}")[0].tolist()
         i += 1
     return str(llm.decode(generated))
 
