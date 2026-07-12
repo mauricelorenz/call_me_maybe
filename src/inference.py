@@ -1,5 +1,5 @@
 import json
-from typing import List, Any, Tuple, Dict
+from typing import List, Any, Tuple, Dict, Callable
 import llm_sdk
 import numpy as np
 import os
@@ -10,6 +10,10 @@ import re
 
 NUMERIC_REGEX = re.compile(r"^[0-9.\-eE\s]+$")
 INTEGER_REGEX = re.compile(r"^[0-9\-]+$")
+NUMBER_PREFIX_REGEX = re.compile(r"^-?(0|[1-9][0-9]*)?"
+                                 r"(\.[0-9]*)?"
+                                 r"([eE][+-]?[0-9]*)?$")
+INTEGER_PREFIX_REGEX = re.compile(r"^-?(0|[1-9][0-9]*)?$")
 
 
 class FunctionsContext(BaseModel):
@@ -35,6 +39,7 @@ def load_vocab_mappings(
                                         "number_end": [],
                                         "boolean": [],
                                         "string_safe": [],
+                                        "backslash": [],
                                         "quote": [],
                                         "escape": []}
     for token_str, token_id in vocab.items():
@@ -50,9 +55,12 @@ def load_vocab_mappings(
             categories["number_end"].append(token_id)
         if clean_str.strip() in ["true", "false"]:
             categories["boolean"].append(token_id)
-        if "\"" not in clean_str:
+        if "\"" not in clean_str and (
+                clean_str.strip() == "\\" or "\\" not in clean_str):
             categories["string_safe"].append(token_id)
-        if clean_str == "\"" or clean_str == " \"":
+        if clean_str.strip() == "\\":
+            categories["backslash"].append(token_id)
+        if clean_str in ["\"", " \"", "\","]:
             categories["quote"].append(token_id)
         if clean_str in "\"\\/bfnrt" and len(clean_str) == 1:
             categories["escape"].append(token_id)
@@ -133,7 +141,7 @@ def apply_mask(
 def generate_value(
     llm: Any,
     context_tokens: List[int],
-    candidate_ids: List[int],
+    get_candidates: Callable[[List[int]], List[int]],
     stop_ids: List[int],
     max_tokens: int
 ) -> List[int]:
@@ -142,6 +150,7 @@ def generate_value(
     while i < max_tokens:
         logits = np.array(llm.get_logits_from_input_ids(context_tokens
                                                         + generated_value))
+        candidate_ids = get_candidates(generated_value)
         masked_logits = apply_mask(candidate_ids + stop_ids, logits)
         next_token = np.argmax(masked_logits)
         if next_token in stop_ids:
@@ -153,16 +162,36 @@ def generate_value(
 
 def get_ids(
     categories: Dict[str, List[int]],
+    id_to_str: Dict[int, str],
     param_type: str
-) -> Tuple[List[int], List[int], int]:
+) -> Tuple[Callable[[List[int]], List[int]], List[int], int]:
+
+    def string_candidates(generated_value: List[int]) -> List[int]:
+        if generated_value and generated_value[-1] in categories["backslash"]:
+            return categories["escape"]
+        return categories["string_safe"]
+
+    def number_candidates(generated_value: List[int]) -> List[int]:
+        current_str = "".join(id_to_str[t] for t in generated_value)
+        return [t for t in categories["number"]
+                if NUMBER_PREFIX_REGEX.match(current_str + id_to_str[t])]
+
+    def integer_candidates(generated_value: List[int]) -> List[int]:
+        current_str = "".join(id_to_str[t] for t in generated_value)
+        return [t for t in categories["integer"]
+                if INTEGER_PREFIX_REGEX.match(current_str + id_to_str[t])]
+
+    def boolean_candidates(generated_value: List[int]) -> List[int]:
+        return categories["boolean"]
+
     if param_type == "number":
-        return (categories["number"], categories["number_end"], 30)
+        return (number_candidates, categories["number_end"], 30)
     elif param_type == "integer":
-        return (categories["integer"], categories["number_end"], 30)
+        return (integer_candidates, categories["number_end"], 30)
     elif param_type == "string":
-        return (categories["string_safe"], categories["quote"], 100)
+        return (string_candidates, categories["quote"], 100)
     elif param_type == "boolean":
-        return (categories["boolean"], [], 1)
+        return (boolean_candidates, [], 1)
     else:
         raise ValueError(f"Unknown parameter type: {param_type}")
 
@@ -181,24 +210,29 @@ def get_result_json(
                                                 prompt_string,
                                                 function_name)
     id_to_str, categories = load_vocab_mappings(llm)
-    generated = llm.encode(f"{{\"prompt\": \"{prompt_string}\", "
-                           f"\"name\": \"{function_name}\", "
+    generated = llm.encode(f"{{\"prompt\": {json.dumps(prompt_string)}, "
+                           f"\"name\": {json.dumps(function_name)}, "
                            f"\"parameters\": {{")[0].tolist()
     i = 0
     while i < len(parameters_context.param_types):
         generated += parameters_context.param_tokens[i]
-        context_tokens = parameters_context.prompt_tokens + generated
-        candidate_ids, stop_ids, max_tokens = get_ids(
+        get_candidates, stop_ids, max_tokens = get_ids(
             categories,
+            id_to_str,
             parameters_context.param_types[i]
         )
+        if parameters_context.param_types[i] == "string":
+            generated += llm.encode("\"")[0].tolist()
+        context_tokens = parameters_context.prompt_tokens + generated
         generated += generate_value(
             llm,
             context_tokens,
-            candidate_ids,
+            get_candidates,
             stop_ids,
             max_tokens
         )
+        if parameters_context.param_types[i] == "string":
+            generated += llm.encode("\"")[0].tolist()
         if i < len(parameters_context.param_types) - 1:
             generated += llm.encode(",")[0].tolist()
         else:
