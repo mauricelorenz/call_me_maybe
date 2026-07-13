@@ -55,7 +55,7 @@ def load_vocab_mappings(
             categories["number_end"].append(token_id)
         if clean_str.strip() in ["true", "false"]:
             categories["boolean"].append(token_id)
-        if "\"" not in clean_str and (
+        if "\"" not in clean_str and clean_str.isascii() and (
                 clean_str.strip() == "\\" or "\\" not in clean_str):
             categories["string_safe"].append(token_id)
         if clean_str.strip() == "\\":
@@ -76,7 +76,7 @@ def get_functions_context(
                             in functions_definition])
     full_prompt = ("Pick the function matching the prompt "
                    f"'{prompt_string}' out of the following:\n\n"
-                   f"{fd_string}\n\nReturn only the name.")
+                   f"{fd_string}\n\nReturn only the name.\n\n")
     full_prompt_tokens = llm.encode(full_prompt)[0].tolist()
     functions_tokens = []
     for item in functions_definition:
@@ -120,7 +120,7 @@ def get_function_name(llm: Any, functions_context: FunctionsContext) -> str:
         logits = np.array(llm.get_logits_from_input_ids(logits_base))
         masked = np.full(len(logits), -np.inf)
         for tokens in functions_context.functions_tokens:
-            if (len(tokens) > i and tokens[:i] == generated[:i]):
+            if len(tokens) > i and tokens[:i] == generated[:i]:
                 masked[tokens[i]] = logits[tokens[i]]
         generated.append(int(np.argmax(masked)))
         if generated in functions_context.functions_tokens:
