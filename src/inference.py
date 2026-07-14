@@ -146,7 +146,8 @@ def generate_value(
     context_tokens: List[int],
     get_candidates: Callable[[List[int]], List[int]],
     stop_ids: List[int],
-    max_tokens: int
+    max_tokens: int,
+    stop_allowed: Callable[[List[int]], bool]
 ) -> List[int]:
     generated_value: List[int] = []
     i = 0
@@ -154,7 +155,8 @@ def generate_value(
         logits = np.array(llm.get_logits_from_input_ids(context_tokens
                                                         + generated_value))
         candidate_ids = get_candidates(generated_value)
-        masked_logits = apply_mask(candidate_ids + stop_ids, logits)
+        active_stop = stop_ids if stop_allowed(generated_value) else []
+        masked_logits = apply_mask(candidate_ids + active_stop, logits)
         #  ############################################################# DEBUG
         # masked_logits_dummy = np.copy(masked_logits)
         # for j in range(5):
@@ -175,7 +177,8 @@ def get_ids(
     categories: Dict[str, List[int]],
     id_to_str: Dict[int, str],
     param_type: str
-) -> Tuple[Callable[[List[int]], List[int]], List[int], int]:
+) -> Tuple[Callable[[List[int]], List[int]],
+           List[int], int, Callable[[List[int]], bool]]:
 
     def string_candidates(generated_value: List[int]) -> List[int]:
         if generated_value and generated_value[-1] in categories["backslash"]:
@@ -195,14 +198,28 @@ def get_ids(
     def boolean_candidates(generated_value: List[int]) -> List[int]:
         return categories["boolean"]
 
+    def number_stop_allowed(generated_value: List[int]) -> bool:
+        current_str = "".join(id_to_str[t] for t in generated_value).lower()
+        if "e" in current_str:
+            after_e = current_str.split("e")[-1].lstrip("+-")
+            return len(after_e) > 0 and after_e[-1].isdigit()
+        if "." in current_str:
+            after_dot = current_str.split(".")[-1]
+            return len(after_dot) > 0 and after_dot[-1].isdigit()
+        return False
+
+    def always_stop(generated_value: List[int]) -> bool:
+        return True
+
     if param_type == "number":
-        return (number_candidates, categories["number_end"], 30)
+        return (number_candidates, categories["number_end"],
+                30, number_stop_allowed)
     elif param_type == "integer":
-        return (integer_candidates, categories["number_end"], 30)
+        return (integer_candidates, categories["number_end"], 30, always_stop)
     elif param_type == "string":
-        return (string_candidates, categories["quote"], 100)
+        return (string_candidates, categories["quote"], 100, always_stop)
     elif param_type == "boolean":
-        return (boolean_candidates, [], 1)
+        return (boolean_candidates, [], 1, always_stop)
     else:
         raise ValueError(f"Unknown parameter type: {param_type}")
 
@@ -227,7 +244,7 @@ def get_result_json(
     i = 0
     while i < len(parameters_context.param_types):
         generated += parameters_context.param_tokens[i]
-        get_candidates, stop_ids, max_tokens = get_ids(
+        get_candidates, stop_ids, max_tokens, stop_allowed = get_ids(
             categories,
             id_to_str,
             parameters_context.param_types[i]
@@ -240,7 +257,8 @@ def get_result_json(
             context_tokens,
             get_candidates,
             stop_ids,
-            max_tokens
+            max_tokens,
+            stop_allowed
         )
         if parameters_context.param_types[i] == "string":
             generated += llm.encode("\"")[0].tolist()
@@ -260,6 +278,8 @@ def generate_outfile(
     llm = llm_sdk.Small_LLM_Model()  # type: ignore
     input_len = len(input_prompts)
     json_from_file = []
+    if not os.path.exists(output_path):
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
     for i, item in enumerate(input_prompts, 1):
         print(f"\nProcessing prompt {i}/{input_len}...")
         try:
@@ -267,17 +287,12 @@ def generate_outfile(
                                             item.prompt)
             result_json = json.loads(result_string)
             print(json.dumps(result_json, indent=2))
-            if not os.path.exists(output_path):
-                os.makedirs(os.path.dirname(output_path), exist_ok=True)
             json_from_file.append(result_json)
             with open(output_path, "w") as f:
                 json.dump(json_from_file, f, indent=2)
-        # except json.JSONDecodeError as e:
-        #     print("Error while generating function call "
-        #           f"for prompt '{prompt_string}':\n{e}")
-        # except OSError as e:
-        #     print("Error while writing function call to file "
-        #           f"for prompt '{prompt_string}':\n{e.strerror}")
-        except Exception:
-            print(item)
-            print(result_string)  # ##################################### DEBUG
+        except json.JSONDecodeError as e:
+            print("Error while generating function call "
+                  f"for prompt '{item.prompt}':\n{e}")
+        except OSError as e:
+            print("Error while writing function call to file "
+                  f"for prompt '{item.prompt}':\n{e.strerror}")
