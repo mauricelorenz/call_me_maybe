@@ -60,7 +60,7 @@ def load_vocab_mappings(
             categories["string_safe"].append(token_id)
         if clean_str.strip() == "\\":
             categories["backslash"].append(token_id)
-        if clean_str in ["\"", " \"", "\","]:
+        if clean_str in ["\"", " \"", "\",", "\"}", "\"}}"]:
             categories["quote"].append(token_id)
         if clean_str in "\"\\/bfnrt" and len(clean_str) == 1:
             categories["escape"].append(token_id)
@@ -98,7 +98,10 @@ def get_parameters_context(
     fn_string = json.dumps(function.model_dump())
     full_prompt = (f"Given the function '{function_name}' with definition "
                    f"'{fn_string}', extract the arguments from the prompt "
-                   f"'{prompt_string}'. Return only a valid JSON object.\n\n")
+                   f"'{prompt_string}'. Always use correct JSON escape"
+                   " sequences, where aplicable. If regular expressions are "
+                   "required, choose the simplest aproach. Return only a "
+                   "valid JSON object.\n\n")
     full_prompt_tokens = llm.encode(full_prompt)[0].tolist()
     param_keys = [key for key in function.parameters]
     param_tokens = []
@@ -152,6 +155,14 @@ def generate_value(
                                                         + generated_value))
         candidate_ids = get_candidates(generated_value)
         masked_logits = apply_mask(candidate_ids + stop_ids, logits)
+        #  ############################################################# DEBUG
+        # masked_logits_dummy = np.copy(masked_logits)
+        # for j in range(5):
+        #     test_token = np.argmax(masked_logits_dummy)
+        #     print(f"{j}: {test_token} ({llm.decode(test_token)})")
+        #     masked_logits_dummy[test_token] = -np.inf
+        # print("=========================")
+        #  ############################################################# DEBUG
         next_token = np.argmax(masked_logits)
         if next_token in stop_ids:
             break
