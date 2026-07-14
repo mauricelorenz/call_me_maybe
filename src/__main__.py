@@ -14,7 +14,7 @@ def main() -> None:
                         default="data/input/function_calling_tests.json",
                         help="path for the input JSON file")
     parser.add_argument("--output",
-                        default="data/output/function_calls.json",
+                        default="data/output/function_calling_results.json",
                         help="path for the output JSON file")
     args = parser.parse_args()
     functions_definition: List[FunctionsDefinition] = parse_infile(
