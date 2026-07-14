@@ -278,8 +278,9 @@ def generate_outfile(
     llm = llm_sdk.Small_LLM_Model()  # type: ignore
     input_len = len(input_prompts)
     json_from_file = []
-    if not os.path.exists(output_path):
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     for i, item in enumerate(input_prompts, 1):
         print(f"\nProcessing prompt {i}/{input_len}...")
         try:
