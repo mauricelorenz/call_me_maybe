@@ -6,6 +6,7 @@ import os
 from src.parsing import FunctionsDefinition, InputPrompt
 from pydantic import BaseModel
 import re
+from sys import stderr
 
 
 NUMERIC_REGEX = re.compile(r"^[0-9.\-eE\s]+$")
@@ -157,14 +158,6 @@ def generate_value(
         candidate_ids = get_candidates(generated_value)
         active_stop = stop_ids if stop_allowed(generated_value) else []
         masked_logits = apply_mask(candidate_ids + active_stop, logits)
-        #  ############################################################# DEBUG
-        # masked_logits_dummy = np.copy(masked_logits)
-        # for j in range(5):
-        #     test_token = np.argmax(masked_logits_dummy)
-        #     print(f"{j}: {test_token} ({llm.decode(test_token)})")
-        #     masked_logits_dummy[test_token] = -np.inf
-        # print("=========================")
-        #  ############################################################# DEBUG
         next_token = np.argmax(masked_logits)
         if next_token in stop_ids:
             break
@@ -293,7 +286,7 @@ def generate_outfile(
                 json.dump(json_from_file, f, indent=2)
         except json.JSONDecodeError as e:
             print("Error while generating function call "
-                  f"for prompt '{item.prompt}':\n{e}")
+                  f"for prompt '{item.prompt}':\n{e}", file=stderr)
         except OSError as e:
             print("Error while writing function call to file "
-                  f"for prompt '{item.prompt}':\n{e.strerror}")
+                  f"for prompt '{item.prompt}':\n{e.strerror}", file=stderr)
