@@ -1,15 +1,16 @@
 """Constrained decoding for function-calling with a small LLM."""
 
 import json
-from typing import List, Any, Tuple, Dict, Callable
-import llm_sdk
-import numpy as np
 import os
-from src.parsing import FunctionsDefinition, InputPrompt
-from pydantic import BaseModel
 import re
 from sys import stderr
+from typing import Any, Callable, Dict, List, Tuple
 
+import numpy as np
+from pydantic import BaseModel
+
+import llm_sdk
+from src.parsing import FunctionsDefinition, InputPrompt
 
 NUMERIC_REGEX = re.compile(r"^[0-9.\-eE\s]+$")
 INTEGER_REGEX = re.compile(r"^[0-9\-]+$")

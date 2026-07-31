@@ -2,9 +2,9 @@
 
 import json
 from sys import exit, stderr
-from typing import List, Dict, Type, TypeVar, Any
-from pydantic import BaseModel, ValidationError
+from typing import Any, Dict, List, Type, TypeVar
 
+from pydantic import BaseModel, ValidationError
 
 T = TypeVar("T", bound=BaseModel)
 

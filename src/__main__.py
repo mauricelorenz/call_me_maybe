@@ -1,9 +1,10 @@
 """Command-line entry point for function-calling with a small LLM."""
 
 import argparse
-from src.parsing import FunctionsDefinition, InputPrompt, parse_infile
-from src.inference import generate_outfile
 from typing import List
+
+from src.inference import generate_outfile
+from src.parsing import FunctionsDefinition, InputPrompt, parse_infile
 
 
 def main() -> None:
