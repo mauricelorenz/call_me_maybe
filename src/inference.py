@@ -1,3 +1,5 @@
+"""Constrained decoding for function-calling with a small LLM."""
+
 import json
 from typing import List, Any, Tuple, Dict, Callable
 import llm_sdk
@@ -18,11 +20,15 @@ INTEGER_PREFIX_REGEX = re.compile(r"^-?(0|[1-9][0-9]*)?$")
 
 
 class FunctionsContext(BaseModel):
+    """Holds the context for the function selection."""
+
     prompt_tokens: List[int]
     functions_tokens: List[List[int]]
 
 
 class ParametersContext(BaseModel):
+    """Holds the context for the parameters extraction."""
+
     prompt_tokens: List[int]
     param_tokens: List[List[int]]
     param_types: List[str]
@@ -31,6 +37,15 @@ class ParametersContext(BaseModel):
 def load_vocab_mappings(
     llm: Any
 ) -> Tuple[Dict[int, str], Dict[str, List[int]]]:
+    """Parse the vocab file and get mappings for specific tokens.
+
+    Args:
+        llm: instance of the llm required to get vocab file.
+
+    Returns:
+        Tuple of an inversed vocabulary and allowed tokens for
+            constrained decoding.
+    """
     vocab_path = llm.get_path_to_vocab_file()
     with open(vocab_path) as f:
         vocab = json.load(f)
@@ -73,6 +88,16 @@ def get_functions_context(
     functions_definition: List[FunctionsDefinition],
     prompt_string: str
 ) -> FunctionsContext:
+    """Build a FunctionsContext instance.
+
+    Args:
+        llm: instance of the llm required to get vocab file.
+        functions_definition: list of available functions for the llm to pick.
+        prompt_string: current prompt telling the llm which function to choose.
+
+    Returns:
+        Instance of FunctionsContext to be used in the function selection.
+    """
     fd_string = json.dumps([fd.model_dump() for fd
                             in functions_definition])
     full_prompt = ("Pick the function matching the prompt "
@@ -92,6 +117,17 @@ def get_parameters_context(
     prompt_string: str,
     function_name: str
 ) -> ParametersContext:
+    """Build a ParametersContext instance.
+
+    Args:
+        llm: instance of the llm required to get vocab file.
+        functions_definition: list of available functions for the llm to pick.
+        prompt_string: current prompt telling the llm which function to choose.
+        function_name: name of the currently selected function.
+
+    Returns:
+        Instance of ParametersContext to be used in the parameter extraction.
+    """
     for fd in functions_definition:
         if fd.name == function_name:
             function = fd
@@ -100,8 +136,8 @@ def get_parameters_context(
     full_prompt = (f"Given the function '{function_name}' with definition "
                    f"'{fn_string}', extract the arguments from the prompt "
                    f"'{prompt_string}'. Always use correct JSON escape"
-                   " sequences, where aplicable. If regular expressions are "
-                   "required, choose the simplest aproach. Return only a "
+                   " sequences, where applicable. If regular expressions are "
+                   "required, choose the simplest approach. Return only a "
                    "valid JSON object.\n\n")
     full_prompt_tokens = llm.encode(full_prompt)[0].tolist()
     param_keys = [key for key in function.parameters]
@@ -116,6 +152,16 @@ def get_parameters_context(
 
 
 def get_function_name(llm: Any, functions_context: FunctionsContext) -> str:
+    """Pick the matching function from all available functions.
+
+    Args:
+        llm: instance of the llm required to get vocab file.
+        functions_context: instance containing the already tokenized prompt and
+            tokens for all available functions.
+
+    Returns:
+        The selected function name as string.
+    """
     i = 0
     max_tokens = len(max(functions_context.functions_tokens, key=len))
     generated: List[int] = []
@@ -137,6 +183,15 @@ def apply_mask(
     mask: List[int],
     logits: np.ndarray[Any, np.dtype[Any]]
 ) -> np.ndarray[Any, np.dtype[Any]]:
+    """Apply the currently selected mask on the logits.
+
+    Args:
+        mask: list of all currently allowed tokens.
+        logits: the raw array of logits returned by the llm.
+
+    Returns:
+        Masked array of logits set to -inf for non-allowed tokens.
+    """
     masked = np.full(len(logits), -np.inf)
     masked[mask] = logits[mask]
     return masked
@@ -150,6 +205,19 @@ def generate_value(
     max_tokens: int,
     stop_allowed: Callable[[List[int]], bool]
 ) -> List[int]:
+    """Generate tokens until a stop token or the token limit is reached.
+
+    Args:
+        llm: instance of the llm required to get vocab file.
+        context_tokens: tokens of prompt and already generated JSON.
+        get_candidates: function that returns the available ids for masking.
+        stop_ids: token ids that stop the generation.
+        max_tokens: token limit to break in case of a generation loop.
+        stop_allowed: function that prevents premature stop of generation.
+
+    Returns:
+        List of token ids containing the generated value.
+    """
     generated_value: List[int] = []
     i = 0
     while i < max_tokens:
@@ -172,26 +240,77 @@ def get_ids(
     param_type: str
 ) -> Tuple[Callable[[List[int]], List[int]],
            List[int], int, Callable[[List[int]], bool]]:
+    """Get utilities for the constrained decoding based on the parameter type.
 
-    def string_candidates(generated_value: List[int]) -> List[int]:
-        if generated_value and generated_value[-1] in categories["backslash"]:
-            return categories["escape"]
-        return categories["string_safe"]
+    Args:
+        categories: raw tokens for the masking.
+        id_to_str: inverted vocab for filtering token ids.
+        param_type: current parameter type.
+
+    Returns:
+        Tuple containing specific candidates function, stop ids, token limit
+            and stop function.
+    """
 
     def number_candidates(generated_value: List[int]) -> List[int]:
+        """Return number tokens that keep the value a valid numeric prefix.
+
+        Args:
+            generated_value: token ids generated so far for this value.
+
+        Returns:
+            List of allowed token ids.
+        """
         current_str = "".join(id_to_str[t] for t in generated_value)
         return [t for t in categories["number"]
                 if NUMBER_PREFIX_REGEX.match(current_str + id_to_str[t])]
 
     def integer_candidates(generated_value: List[int]) -> List[int]:
+        """Return integer tokens that keep the value a valid integer prefix.
+
+        Args:
+            generated_value: token ids generated so far for this value.
+
+        Returns:
+            List of allowed token ids.
+        """
         current_str = "".join(id_to_str[t] for t in generated_value)
         return [t for t in categories["integer"]
                 if INTEGER_PREFIX_REGEX.match(current_str + id_to_str[t])]
 
+    def string_candidates(generated_value: List[int]) -> List[int]:
+        """Return safe string tokens, or escape chars after a backslash.
+
+        Args:
+            generated_value: token ids generated so far for this value.
+
+        Returns:
+            List of allowed token ids.
+        """
+        if generated_value and generated_value[-1] in categories["backslash"]:
+            return categories["escape"]
+        return categories["string_safe"]
+
     def boolean_candidates(generated_value: List[int]) -> List[int]:
+        """Return the boolean tokens.
+
+        Args:
+            generated_value: token ids generated so far for this value.
+
+        Returns:
+            List of allowed token ids.
+        """
         return categories["boolean"]
 
     def number_stop_allowed(generated_value: List[int]) -> bool:
+        """Block stopping mid-decimal or mid-exponent (e.g. "5." or "5e").
+
+        Args:
+            generated_value: token ids generated so far for this value.
+
+        Returns:
+            True if stopping is currently allowed.
+        """
         current_str = "".join(id_to_str[t] for t in generated_value).lower()
         if "e" in current_str:
             after_e = current_str.split("e")[-1].lstrip("+-")
@@ -202,6 +321,14 @@ def get_ids(
         return False
 
     def always_stop(generated_value: List[int]) -> bool:
+        """Allow stopping unconditionally.
+
+        Args:
+            generated_value: token ids generated so far for this value.
+
+        Returns:
+            True.
+        """
         return True
 
     if param_type == "number":
@@ -222,6 +349,16 @@ def get_result_json(
     functions_definition: List[FunctionsDefinition],
     prompt_string: str
 ) -> str:
+    """Generate the full function-call JSON for a single prompt.
+
+    Args:
+        llm: instance of the llm required to get vocab file.
+        functions_definition: list of available functions for the llm to pick.
+        prompt_string: current prompt telling the llm which function to choose.
+
+    Returns:
+        The generated function call as a JSON string.
+    """
     functions_context = get_functions_context(llm,
                                               functions_definition,
                                               prompt_string)
@@ -268,6 +405,13 @@ def generate_outfile(
     input_prompts: List[InputPrompt],
     output_path: str
 ) -> None:
+    """Run inference for all prompts and write results to a file.
+
+    Args:
+        functions_definition: list of available functions for the llm to pick.
+        input_prompts: list of prompts to process.
+        output_path: path to write the resulting JSON array to.
+    """
     llm = llm_sdk.Small_LLM_Model()  # type: ignore
     input_len = len(input_prompts)
     json_from_file = []
