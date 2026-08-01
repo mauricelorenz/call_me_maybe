@@ -101,8 +101,8 @@ def get_functions_context(
     """
     fd_string = json.dumps([fd.model_dump() for fd
                             in functions_definition])
-    full_prompt = ("Pick the function matching the prompt "
-                   f"'{prompt_string}' out of the following:\n\n"
+    full_prompt = ("Pick the function matching the following prompt:"
+                   f"\n\n{prompt_string}\n\n out of the following options:\n\n"
                    f"{fd_string}\n\nReturn only the name.\n\n")
     full_prompt_tokens = llm.encode(full_prompt)[0].tolist()
     functions_tokens = []
